@@ -1,0 +1,285 @@
+# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+# contributors may be used to endorse or promote products derived from
+# this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# Copyright (c) 2021 ETH Zurich, Nikita Rudin
+
+import matplotlib.pyplot as plt
+import numpy as np
+from collections import defaultdict
+from multiprocessing import Process, Value
+
+class Logger:
+    def __init__(self, dt):
+        self.state_log = defaultdict(list)
+        self.rew_log = defaultdict(list)
+        self.dt = dt
+        self.num_episodes = 0
+        self.plot_process = None
+
+    def log_state(self, key, value):
+        self.state_log[key].append(value)
+
+    def log_states(self, dict):
+        for key, value in dict.items():
+            self.log_state(key, value)
+
+    def log_rewards(self, dict, num_episodes):
+        for key, value in dict.items():
+            if 'rew' in key:
+                self.rew_log[key].append(value.item() * num_episodes)
+        self.num_episodes += num_episodes
+
+    def reset(self):
+        self.state_log.clear()
+        self.rew_log.clear()
+
+    def plot_states(self):
+        self.plot_process = Process(target=self._plot)
+        self.plot_process.start()
+
+    def _plot(self):
+        nb_rows = 13
+        nb_cols = 3
+        fig, axs = plt.subplots(nb_rows, nb_cols)
+        for key, value in self.state_log.items():
+            time = np.linspace(0, len(value)*self.dt, len(value))
+            break
+        log= self.state_log
+        # plot joint targets and measured positions
+        a = axs[1, 0]
+        if log["dof_pos"]: a.plot(time, log["dof_pos"], label='measured')
+        if log["dof_pos_target"]: a.plot(time, log["dof_pos_target"], label='target')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='DOF Position')
+        a.legend()
+        # plot joint velocity
+        a = axs[1, 1]
+        if log["dof_vel"]: a.plot(time, log["dof_vel"], label='measured')
+        if log["dof_vel_target"]: a.plot(time, log["dof_vel_target"], label='target')
+        a.set(xlabel='time [s]', ylabel='Velocity [rad/s]', title='Joint Velocity')
+        a.legend()
+        # plot base vel x
+        a = axs[0, 0]
+        if log["base_vel_x"]: a.plot(time, log["base_vel_x"], label='measured')
+        if log["command_x"]: a.plot(time, log["command_x"], label='commanded')
+        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity x')
+        a.legend()
+        # plot base vel y
+        a = axs[0, 1]
+        if log["base_vel_y"]: a.plot(time, log["base_vel_y"], label='measured')
+        if log["command_y"]: a.plot(time, log["command_y"], label='commanded')
+        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity y')
+        a.legend()
+        # plot base vel yaw
+        a = axs[0, 2]
+        if log["base_vel_yaw"]: a.plot(time, log["base_vel_yaw"], label='measured')
+        if log["command_yaw"]: a.plot(time, log["command_yaw"], label='commanded')
+        a.set(xlabel='time [s]', ylabel='base ang vel [rad/s]', title='Base velocity yaw')
+        a.legend()
+        # plot base vel z
+        a = axs[1, 2]
+        if log["base_vel_z"]: a.plot(time, log["base_vel_z"], label='measured')
+        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity z')
+        a.legend()
+        # plot contact forces
+        a = axs[2, 0]
+        if log["contact_forces_z"]:
+            forces = np.array(log["contact_forces_z"])
+            for i in range(forces.shape[1]):
+                a.plot(time, forces[:, i], label=f'force {i}')
+        a.set(xlabel='time [s]', ylabel='Forces z [N]', title='Vertical Contact forces')
+        a.legend()
+        # plot torque/vel curves
+        a = axs[2, 1]
+        if log["dof_vel"]!=[] and log["dof_torque"]!=[]: a.plot(log["dof_vel"], log["dof_torque"], 'x', label='measured')
+        a.set(xlabel='Joint vel [rad/s]', ylabel='Joint Torque [Nm]', title='Torque/velocity curves')
+        a.legend()
+        # plot torques
+        a = axs[2, 2]
+        if log["dof_torque"]!=[]: a.plot(time, log["dof_torque"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='Torque')
+        a.legend()
+        # plot joint angles
+        a = axs[3, 0]
+        if log["dof_pos_0"]: a.plot(time, log["dof_pos_0"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 0 Position')
+        a.legend()
+        a = axs[3, 1]
+        if log["dof_pos_1"]: a.plot(time, log["dof_pos_1"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 1 Position')
+        a.legend()
+        a = axs[3, 2]
+        if log["dof_pos_2"]: a.plot(time, log["dof_pos_2"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 2 Position')
+        a.legend()
+        a = axs[4, 0]
+        if log["dof_pos_3"]: a.plot(time, log["dof_pos_3"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 3 Position')
+        a.legend()
+        a = axs[4, 1]
+        if log["dof_pos_4"]: a.plot(time, log["dof_pos_4"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 4 Position')
+        a.legend()
+        a = axs[4, 2]
+        if log["dof_pos_5"]: a.plot(time, log["dof_pos_5"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 5 Position')
+        a.legend()
+        a = axs[5, 0]
+        if log["dof_pos_6"]: a.plot(time, log["dof_pos_6"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 6 Position')
+        a.legend()
+        a = axs[5, 1]
+        if log["dof_pos_7"]: a.plot(time, log["dof_pos_7"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 7 Position')
+        a.legend()
+        a = axs[5, 2]
+        if log["dof_pos_8"]: a.plot(time, log["dof_pos_8"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 8 Position')
+        a.legend()
+        a = axs[6, 0]
+        if log["dof_pos_9"]: a.plot(time, log["dof_pos_9"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 9 Position')
+        a.legend()
+        a = axs[6, 1]
+        if log["dof_pos_10"]: a.plot(time, log["dof_pos_10"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 10 Position')
+        a.legend()
+        a = axs[6, 2]
+        if log["dof_pos_11"]: a.plot(time, log["dof_pos_11"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Position [rad]', title='joint 11 Position')
+        a.legend()
+
+        a = axs[7, 0]
+        if log["dof_torque_0"]: a.plot(time, log["dof_torque_0"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 0 Torque')
+        a.legend()
+        a = axs[7, 1]
+        if log["dof_torque_1"]: a.plot(time, log["dof_torque_1"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 1 Torque')
+        a.legend()
+        a = axs[7, 2]
+        if log["dof_torque_2"]: a.plot(time, log["dof_torque_2"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 2 Torque')
+        a.legend()
+        a = axs[8, 0]
+        if log["dof_torque_3"]: a.plot(time, log["dof_torque_3"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 3 Torque')
+        a.legend()
+        a = axs[8, 1]
+        if log["dof_torque_4"]: a.plot(time, log["dof_torque_4"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 4 Torque')
+        a.legend()
+        a = axs[8, 2]
+        if log["dof_torque_5"]: a.plot(time, log["dof_torque_5"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 5 Torque')
+        a.legend()
+        a = axs[9, 0]
+        if log["dof_torque_6"]: a.plot(time, log["dof_torque_6"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 6 Torque')
+        a.legend()
+        a = axs[9, 1]
+        if log["dof_torque_7"]: a.plot(time, log["dof_torque_7"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 7 Torque')
+        a.legend()
+        a = axs[9, 2]
+        if log["dof_torque_8"]: a.plot(time, log["dof_torque_8"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 8 Torque')
+        a.legend()
+        a = axs[10, 0]
+        if log["dof_torque_9"]: a.plot(time, log["dof_torque_9"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 9 Torque')
+        a.legend()
+        a = axs[10, 1]
+        if log["dof_torque_10"]: a.plot(time, log["dof_torque_10"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 10 Torque')
+        a.legend()
+        a = axs[10, 2]
+        if log["dof_torque_11"]: a.plot(time, log["dof_torque_11"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 11 Torque')
+        a.legend()
+        a = axs[11, 0]
+        if log["dof_torque_12"]: a.plot(time, log["dof_torque_12"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 12 Torque')
+        a.legend()
+        a = axs[11, 1]
+        if log["dof_torque_13"]: a.plot(time, log["dof_torque_13"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 13 Torque')
+        a.legend()
+        a = axs[11, 2]
+        if log["dof_torque_14"]: a.plot(time, log["dof_torque_14"], label='measured')
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 14 Torque')
+        a.legend()
+        a = axs[12, 0]
+        a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='joint 15 Torque')
+        a.legend()
+
+        plt.show()
+
+    def print_rewards(self):
+        print("Average rewards per second:")
+        for key, values in self.rew_log.items():
+            mean = np.sum(np.array(values)) / self.num_episodes
+            print(f" - {key}: {mean}")
+        print(f"Total number of episodes: {self.num_episodes}")
+    
+    def __del__(self):
+        if self.plot_process is not None:
+            self.plot_process.kill()
+
+
+
+    def PlotStable(self):
+        nb_rows = 1
+        nb_cols = 2
+        fig, axs = plt.subplots(nb_rows, nb_cols)
+        for key, value in self.state_log.items():
+            time = np.linspace(0, len(value)*self.dt, len(value))
+            break
+        log= self.state_log
+        # plot joint targets and measured positions
+        a = axs[0]
+        if log["com_xy_pos"]: a.plot(log["base_pos_x"], log["base_pos_y"], label='measured')
+        # if log["dof_pos_target"]: a.plot(time, log["dof_pos_target"], label='target')
+        a.set(xlabel='base_pos_x [m]', ylabel='base_pos_y [m]', title='Base Position')
+        a.set_xlim([-0.5, 0.5])
+        a.set_ylim([-0.5, 0.5])
+        a.legend()
+
+        a = axs[1]
+        if log["base_yaw"]: a.plot(time, log["base_yaw"], label='measured')
+        # if log["dof_pos_target"]: a.plot(time, log["dof_pos_target"], label='target')
+        a.set(xlabel='time [s]', ylabel='base_yaw [rad]', title='Base yaw')
+        a.set_ylim([-180, 180])
+        a.legend()
+
+
+
+
+
+        plt.show()
+
+    
