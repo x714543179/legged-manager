@@ -2,3 +2,5 @@
 *.obj filter=lfs diff=lfs merge=lfs -text
 *.obj text !filter !merge !diff
 *.dae text !filter !merge !diff
+
+legged_gym/docs/** linguist-generated=true
