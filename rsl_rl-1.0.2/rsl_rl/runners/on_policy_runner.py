@@ -1,390 +1,254 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
-  
-import time
+
+
+from __future__ import annotations
+
 import os
-from collections import deque
-import statistics
-  
-from torch.utils.tensorboard import SummaryWriter
+import time
 import torch
-import wandb
-import numpy as np
 
 from rsl_rl.algorithms import PPO
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCritic_DWAQ
-from rsl_rl.modules import LipschitzActorCritic
-from rsl_rl.env.__init__ import VecEnv
-
-from rsl_rl.algorithms.ppo_lya import LyapunovPPO
-from rsl_rl.algorithms.ppo_lip import LipPPO
+from rsl_rl.env import VecEnv
+from rsl_rl.models import MLPModel
+from rsl_rl.utils import check_nan, resolve_callable
+from rsl_rl.utils.logger import Logger
 
 
 class OnPolicyRunner:
+    """On-policy runner for reinforcement learning algorithms."""
 
-    def __init__(self,
-                 env: VecEnv,
-                 train_cfg,
-                 log_dir=None,
-                 device='cuda:0'):
+    alg: PPO
+    """The actor-critic algorithm."""
 
-        self.cfg=train_cfg["runner"]
-        self.alg_cfg = train_cfg["algorithm"]
-        self.policy_cfg = train_cfg["policy"]
-        self.device = device
+    def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device: str = "cpu") -> None:
+        """Construct the runner, algorithm, and logging stack."""
         self.env = env
-        if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs 
-        else:
-            num_critic_obs = self.env.num_obs
-        cenet_in_dim = self.env.num_obs_hist * self.env.num_obs
-        cenet_out_dim = 19
-        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        self.cfg = train_cfg
+        self.device = device
 
-        # ✅ 移除类型注解 (ActorCritic_DWAQ)，防止编辑器类型固定
-        actor_critic = actor_critic_class(
-            num_actor_obs=self.env.num_obs + cenet_out_dim,
-            num_critic_obs=num_critic_obs,
-            num_actions=self.env.num_actions,
-            cenet_in_dim=cenet_in_dim,
-            cenet_out_dim=cenet_out_dim,
-            **self.policy_cfg).to(self.device)
+        # Setup multi-GPU training if enabled
+        self._configure_multi_gpu()
 
+        # Query observations from the environment for algorithm construction
+        obs = self.env.get_observations()
 
+        # Create the algorithm
+        alg_class: type[PPO] = resolve_callable(self.cfg["algorithm"]["class_name"])  # type: ignore
+        self.alg = alg_class.construct_algorithm(obs, self.env, self.cfg, self.device)
 
+        # Create the logger
+        self.logger = Logger(
+            log_dir=log_dir,
+            cfg=self.cfg,
+            env_cfg=self.env.cfg,
+            num_envs=self.env.num_envs,
+            is_distributed=self.is_distributed,
+            gpu_world_size=self.gpu_world_size,
+            gpu_global_rank=self.gpu_global_rank,
+            device=self.device,
+        )
 
-        if self.cfg["algorithm_class_name"] == "LyapunovPPO":
-            self.alg = LyapunovPPO(actor_critic,
-                                    state_dim=self.env.num_obs,
-                                    action_dim=self.env.num_actions,
-                                    lyapunov_cfg=train_cfg["lyapunov"],
-                                    device=self.device,
-                                    **self.alg_cfg)
-        else:
-            alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-            self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
-
-                # elif self.cfg["algorithm_class_name"] == "LipPPO":
-        #     self.alg = LipPPO(self.env.num_obs+cenet_out_dim,actor_critic,device=self.device,lipschitz_cfg=train_cfg.get("lipschitz", {}), **self.alg_cfg)
-        
-        print("用到的算法程序是", self.cfg["algorithm_class_name"])
-        
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]
-        self.save_interval = self.cfg["save_interval"]
-
-        # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_obs_hist*self.env.num_obs], [self.env.num_actions])
-
-        # Log
-        self.log_dir = log_dir
-
-        self.writer = None
-        self.tot_timesteps = 0
-        self.tot_time = 0
         self.current_learning_iteration = 0
 
-        _, _, _, _ = self.env.reset()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!RESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESET!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    
-    def learn(self, num_learning_iterations, init_at_random_ep_len=False):
-        # initialize writer
-        if self.log_dir is not None and self.writer is None:
-            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+        """Run the learning loop for the specified number of iterations."""
+        # Randomize initial episode lengths (for exploration)
         if init_at_random_ep_len:
-            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
-        obs,obs_hist = self.env.get_observations()
-        privileged_obs,prev_critic_obs = self.env.get_privileged_observations()
-        critic_obs = privileged_obs if privileged_obs is not None else obs
-        obs, critic_obs,prev_critic_obs, obs_hist = obs.to(self.device), critic_obs.to(self.device),prev_critic_obs.to(self.device),obs_hist.to(self.device)
-        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+            self.env.episode_length_buf = torch.randint_like(
+                self.env.episode_length_buf, high=int(self.env.max_episode_length)
+            )
 
-        ep_infos = []
-        rewbuffer = deque(maxlen=100)
-        lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        # Start learning
+        obs = self.env.get_observations().to(self.device)
+        self.alg.train_mode()  # switch to train mode (for dropout for example)
 
-        if self.cfg["algorithm_class_name"] == "LyapunovPPO":
-            torque_cost_buffer = deque(maxlen=100)
-            jerk_cost_buffer = deque(maxlen=100)
-            orientation_cost_buffer = deque(maxlen=100)
-            velocity_cost_buffer = deque(maxlen=100)
-            slip_cost_buffer = deque(maxlen=100)
-            cur_torque_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_jerk_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_orientation_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_velocity_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_slip_cost_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        # Ensure all parameters are in-synced
+        if self.is_distributed:
+            print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
+            self.alg.broadcast_parameters()
 
+        # Initialize the logging writer
+        self.logger.init_logging_writer()
 
-
-        tot_iter = self.current_learning_iteration + num_learning_iterations
-        for it in range(self.current_learning_iteration, tot_iter):
+        # Start training
+        start_it = self.current_learning_iteration
+        total_it = start_it + num_learning_iterations
+        for it in range(start_it, total_it):
             start = time.time()
+            # Rollout
+            with torch.inference_mode():
+                for _ in range(self.cfg["num_steps_per_env"]):
+                    # Sample actions
+                    actions = self.alg.act(obs)
+                    # rollout hook: 让插件在 act 之后、env.step 之前保存跨步观测（如 AMP 的当前帧）
+                    for plugin in self.alg.plugins:
+                        plugin.on_after_act(self, obs)
+                    # Step the environment
+                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    # Check for NaN values from the environment
+                    if self.cfg.get("check_for_nan", True):
+                        check_nan(obs, rewards, dones)
+                    # Move to device
+                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    # post-step hook: 插件可修改 rewards（如 AMP 判别器奖励替换任务奖励）
+                    for plugin in self.alg.plugins:
+                        rewards = plugin.on_after_step(self, obs, rewards, dones, extras)
 
-            if self.cfg["policy_class_name"] ==  "LipschitzActorCritic":
-                for i in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs, prev_critic_obs, obs_hist)
-                    with torch.inference_mode():
-                        obs, privileged_obs, prev_privileged_obs, obs_hist, rewards, dones, infos = self.env.step(actions)
-                        critic_obs = privileged_obs if privileged_obs is not None else obs
-                        prev_critic_obs = prev_privileged_obs
+                    self.alg.process_env_step(obs, rewards, dones, extras)
+                    # Extract intrinsic rewards if RND is used (only for logging)
+                    # Book keeping
+                    self.logger.process_env_step(rewards, dones, extras, None)
 
-                        next_obs = obs
-                        next_obs_hist = obs_hist
-                        costs,torque_cost, jerk_cost, orientation_cost, velocity_cost, slip_cost = self.env.compute_cost()
+                stop = time.time()
+                collect_time = stop - start
+                start = stop
 
-                        obs, critic_obs, prev_critic_obs, obs_hist, rewards, dones, next_obs, next_obs_hist = obs.to(self.device), critic_obs.to(self.device), prev_critic_obs.to(self.device), obs_hist.to(self.device), rewards.to(self.device), dones.to(self.device), next_obs.to(self.device), next_obs_hist.to(self.device)
-                            # print("######prev_critic_obs =====",prev_critic_obs[0,0],'\n',"#####critic_obs =====",critic_obs[0,0])
-                            # print("######obs_hist =====",obs_hist[180,0],'\n',"#####obs =====",obs[0,0])
-                        self.alg.process_env_step(rewards, dones, infos, next_obs, next_obs_hist, costs)
-                            
-                        if self.log_dir is not None:
-                            # Book keeping
-                            if 'episode' in infos:
-                                ep_infos.append(infos['episode'])
-                            cur_reward_sum += rewards
-                            cur_episode_length += 1
-                            new_ids = (dones > 0).nonzero(as_tuple=False)
-                            rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-                            cur_reward_sum[new_ids] = 0
-                            cur_episode_length[new_ids] = 0
+                # Compute returns
+                self.alg.compute_returns(obs)
 
-                with torch.inference_mode():
-                    stop = time.time()
-                    collection_time = stop - start
+            # Update policy
+            loss_dict = self.alg.update()
 
-                                # Learning step
-                    start = stop
-                    self.alg.compute_returns(critic_obs)
-            else:
-                # Rollout
-                with torch.inference_mode():
-                    for i in range(self.num_steps_per_env):
-                        
-                        actions = self.alg.act(obs, critic_obs,prev_critic_obs,obs_hist)
-
-                        #prev_critic_obs = critic_obs
-                        # print("######prev_critic_obs =====",prev_critic_obs)
-                        obs, privileged_obs, prev_privileged_obs, obs_hist, rewards, dones, infos = self.env.step(actions)
-                        critic_obs = privileged_obs if privileged_obs is not None else obs
-                        prev_critic_obs = prev_privileged_obs
-
-                        next_obs = obs
-                        next_obs_hist = obs_hist
-                        costs,torque_cost, jerk_cost, orientation_cost, velocity_cost, slip_cost = self.env.compute_cost()
-
-                        obs, critic_obs, prev_critic_obs, obs_hist, rewards, dones, next_obs, next_obs_hist = obs.to(self.device), critic_obs.to(self.device), prev_critic_obs.to(self.device), obs_hist.to(self.device), rewards.to(self.device), dones.to(self.device), next_obs.to(self.device), next_obs_hist.to(self.device)
-                        # print("######prev_critic_obs =====",prev_critic_obs[0,0],'\n',"#####critic_obs =====",critic_obs[0,0])
-                        # print("######obs_hist =====",obs_hist[180,0],'\n',"#####obs =====",obs[0,0])
-                        self.alg.process_env_step(rewards, dones, infos, next_obs, next_obs_hist, costs)
-                        
-                        if self.log_dir is not None:
-                            # Book keeping
-                            if 'episode' in infos:
-                                ep_infos.append(infos['episode'])
-                            cur_reward_sum += rewards
-                            cur_episode_length += 1
-                            new_ids = (dones > 0).nonzero(as_tuple=False)
-                            rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-                            cur_reward_sum[new_ids] = 0
-                            cur_episode_length[new_ids] = 0
-
-                            if self.cfg["algorithm_class_name"] == "LyapunovPPO":
-                                cur_torque_cost_sum += torque_cost.squeeze(-1)
-                                cur_jerk_cost_sum += jerk_cost.squeeze(-1)
-                                cur_orientation_cost_sum += orientation_cost.squeeze(-1)
-                                cur_velocity_cost_sum += velocity_cost.squeeze(-1)
-                                cur_slip_cost_sum += slip_cost.squeeze(-1)
-                                torque_cost_buffer.extend(cur_torque_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
-                                jerk_cost_buffer.extend(cur_jerk_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
-                                orientation_cost_buffer.extend(cur_orientation_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
-                                velocity_cost_buffer.extend(cur_velocity_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
-                                slip_cost_buffer.extend(cur_slip_cost_sum[new_ids][:, 0].cpu().numpy().tolist())
-                                cur_torque_cost_sum[new_ids] = 0
-                                cur_jerk_cost_sum[new_ids] = 0
-                                cur_orientation_cost_sum[new_ids] = 0
-                                cur_velocity_cost_sum[new_ids] = 0
-                                cur_slip_cost_sum[new_ids] = 0
-
-
-
-
-                    stop = time.time()
-                    collection_time = stop - start
-
-                    # Learning step
-                    start = stop
-                    self.alg.compute_returns(critic_obs)
-            
-            mean_value_loss, mean_surrogate_loss, mean_autoenc_loss = self.alg.update()
-            if self.cfg["algorithm_class_name"] == "LyapunovPPO":
-                Lya_lambda, Lya_deltaL, Lya_loss = self.alg.get_LyaLoss()
             stop = time.time()
             learn_time = stop - start
-            if self.log_dir is not None:
-                self.log(locals())
-            if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
-            ep_infos.clear()
-        
-        self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+            self.current_learning_iteration = it
 
-    def log(self, locs, width=80, pad=35):
-        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-        self.tot_time += locs['collection_time'] + locs['learn_time']
-        iteration_time = locs['collection_time'] + locs['learn_time']
-        wandb_dict = {}
+            # Log information
+            self.logger.log(
+                it=it,
+                start_it=start_it,
+                total_it=total_it,
+                collect_time=collect_time,
+                learn_time=learn_time,
+                loss_dict=loss_dict,
+                learning_rate=self.alg.learning_rate,
+                action_std=self.alg.get_policy().output_std,
+                rnd_weight=getattr(getattr(self.alg, "rnd", None), "weight", None),
+            )
 
-        ep_string = f''
-        if locs['ep_infos']:
-            for key in locs['ep_infos'][0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in locs['ep_infos']:
-                    # handle scalar and zero dimensional tensor infos
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+            # Save model
+            if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
+                self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
 
-                # wandb指令
-                rew_key = key[4:]
-                if rew_key in self.env.reward_scales:
-                    wandb_dict['Episode_rew/' + key] = value / np.clip(np.abs(self.env.reward_scales[rew_key]),1e-11,None)
-                    wandb_dict['Episode_rew_without_scale/' + key] = value
+        # Save the final model after training and stop the logging writer
+        if self.logger.writer is not None:
+            self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))  # type: ignore
+            self.logger.stop_logging_writer()
 
+    def save(self, path: str, infos: dict | None = None) -> None:
+        """Save the models and training state to a given path and upload them if external logging is used."""
+        saved_dict = self.alg.save()
+        saved_dict["iter"] = self.current_learning_iteration
+        saved_dict["infos"] = infos
+        torch.save(saved_dict, path)
+        # Upload model to external logging services
+        self.logger.save_model(path, self.current_learning_iteration)
 
+    def load(
+        self, path: str, load_cfg: dict | None = None, strict: bool = True, map_location: str | None = None
+    ) -> dict:
+        """Load the models and training state from a given path.
 
-        mean_std = self.alg.actor_critic.std.mean()
-        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+        Args:
+            path (str): Path to load the model from.
+            load_cfg (dict | None): Optional dictionary that defines what models and states to load. If None, all
+                models and states are loaded.
+            strict (bool): Whether state_dict loading should be strict.
+            map_location (str | None): Device mapping for loading the model.
+        """
+        loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+        load_iteration = self.alg.load(loaded_dict, load_cfg, strict)
+        if load_iteration:
+            self.current_learning_iteration = loaded_dict["iter"]
+        return loaded_dict["infos"]
 
-        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
-        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
-        self.writer.add_scalar('Loss/autoenc_function', locs['mean_autoenc_loss'], locs['it'])
-        self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
-        self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
-        self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
-        self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
-        if len(locs['rewbuffer']) > 0:
-            self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
-            self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+    def get_inference_policy(self, device: str | None = None) -> MLPModel:
+        """Return the policy on the requested device for inference."""
+        self.alg.eval_mode()  # Switch to evaluation mode (e.g. for dropout)
+        return self.alg.get_policy().to(device)  # type: ignore
 
-        wandb_dict['Loss/value_function'] = locs['mean_value_loss']
-        wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
-        wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
-        wandb_dict['Policy/mean_noise_std'] = mean_std.item()
-        wandb_dict['Perf/learning_time'] = locs['learn_time']
+    def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
+        """Export the model to a Torch JIT file."""
+        jit_model = self.alg.get_policy().as_jit()
+        jit_model.to("cpu")
 
-        if len(locs['rewbuffer']) > 0:
-            wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        save_path = os.path.join(path, filename)
 
+        # Trace and save the model
+        traced_model = torch.jit.script(jit_model)
+        traced_model.save(save_path)
 
-        if self.cfg["algorithm_class_name"] == "LyapunovPPO":
-            wandb_dict['Lya/lambda'] = locs['Lya_lambda']
-            wandb_dict['Lya/delta_L'] = locs['Lya_deltaL']
-            wandb_dict['Lya/Lya_loss'] = locs['Lya_loss']
+    def export_policy_to_onnx(self, path: str, filename: str = "policy.onnx", verbose: bool = False) -> None:
+        """Export the model into an ONNX file."""
+        onnx_model = self.alg.get_policy().as_onnx(verbose=verbose)
+        onnx_model.to("cpu")
+        onnx_model.eval()
 
-            if len(locs['torque_cost_buffer']) > 0:
-                wandb_dict['LyaCost/mean_torque_cost'] = statistics.mean(locs['torque_cost_buffer'])
-                wandb_dict['LyaCost/mean_jerk_cost'] = statistics.mean(locs['jerk_cost_buffer'])
-                wandb_dict['LyaCost/mean_orientation_cost'] = statistics.mean(locs['orientation_cost_buffer'])
-                wandb_dict['LyaCost/mean_velocity_cost'] = statistics.mean(locs['velocity_cost_buffer'])
-                wandb_dict['LyaCost/mean_slip_cost'] = statistics.mean(locs['slip_cost_buffer'])
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        save_path = os.path.join(path, filename)
 
-        wandb.log(wandb_dict, step=locs['it'])
+        # Trace and save the model
+        torch.onnx.export(
+            onnx_model,
+            onnx_model.get_dummy_inputs(),  # type: ignore
+            save_path,
+            export_params=True,
+            opset_version=18,
+            verbose=verbose,
+            input_names=onnx_model.input_names,  # type: ignore
+            output_names=onnx_model.output_names,  # type: ignore
+        )
 
+    def add_git_repo_to_log(self, repo_file_path: str) -> None:
+        """Register a repository path whose git status should be logged."""
+        self.logger.git_status_repos.append(repo_file_path)
 
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+    def _configure_multi_gpu(self) -> None:
+        """Configure multi-gpu training."""
+        # Check if distributed training is enabled
+        self.gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
+        self.is_distributed = self.gpu_world_size > 1
 
-        if len(locs['rewbuffer']) > 0:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                          f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-        else:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Autoenc function loss:':>{pad}} {locs['mean_autoenc_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+        # If not distributed training, set local and global rank to 0 and return
+        if not self.is_distributed:
+            self.gpu_local_rank = 0
+            self.gpu_global_rank = 0
+            self.cfg["multi_gpu"] = None
+            return
 
-        log_string += ep_string
-        log_string += (f"""{'-' * width}\n"""
-                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
-                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
-                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
-                       f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
-                               locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
-        print(log_string)
+        # Get rank and world size
+        self.gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        self.gpu_global_rank = int(os.getenv("RANK", "0"))
 
-    def save(self, path, infos=None):
-        torch.save({
-            'model_state_dict': self.alg.actor_critic.state_dict(),
-            'optimizer_state_dict': self.alg.optimizer.state_dict(),
-            'iter': self.current_learning_iteration,
-            'infos': infos,
-            }, path)
+        # Make a configuration dictionary
+        self.cfg["multi_gpu"] = {
+            "global_rank": self.gpu_global_rank,  # Rank of the main process
+            "local_rank": self.gpu_local_rank,  # Rank of the current process
+            "world_size": self.gpu_world_size,  # Total number of processes
+        }
 
-    def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
-        if load_optimizer:
-            self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
-        self.current_learning_iteration = loaded_dict['iter']
-        return loaded_dict['infos']
+        # Check if user has device specified for local rank
+        if self.device != f"cuda:{self.gpu_local_rank}":
+            raise ValueError(
+                f"Device '{self.device}' does not match expected device for local rank '{self.gpu_local_rank}'."
+            )
+        # Validate multi-GPU configuration
+        if self.gpu_local_rank >= self.gpu_world_size:
+            raise ValueError(
+                f"Local rank '{self.gpu_local_rank}' is greater than or equal to world size '{self.gpu_world_size}'."
+            )
+        if self.gpu_global_rank >= self.gpu_world_size:
+            raise ValueError(
+                f"Global rank '{self.gpu_global_rank}' is greater than or equal to world size '{self.gpu_world_size}'."
+            )
 
-    def get_inference_policy(self, device=None):
-        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
-        if device is not None:
-            self.alg.actor_critic.to(device)
-        return self.alg.actor_critic.act_inference
+        # Initialize torch distributed
+        torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
+        # Set device to the local rank
+        torch.cuda.set_device(self.gpu_local_rank)

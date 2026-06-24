@@ -28,25 +28,14 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
-from legged_gym.managers import ManagerTermCfg
-
 from legged_gym.envs.go2w.go2w_dreamwaq.go2w_config import GO2WRoughCfg, GO2WRoughCfgPPO
 from .go2w.go2w_dreamwaq.go2w_robot import Go2w
 
 # from .nezha.nezha_config import NEZHARoughCfg, NEZHARoughCfgPPO
 # from .nezha.nezha_robot import NEZHA
-
-
-
-
-
-import os
-
 from legged_gym.utils.task_registry import task_registry
 
 
 task_registry.register( "go2w", Go2w, GO2WRoughCfg(), GO2WRoughCfgPPO())
 # task_registry.register("nezha", NEZHA, NEZHARoughCfg(), NEZHARoughCfgPPO() )
-
 

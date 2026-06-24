@@ -28,29 +28,13 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import numpy as np
-import os
-from datetime import datetime
-import sys
-sys.path.append("/home/hu/csq/DreamWaQ/legged_gym")
 import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry
 
-import torch
-import wandb
-
 def train(args):
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
-
-    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
-    run_name = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_')
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../logs"))
-    print(base_dir)
-    mode = "online"
-    wandb.init(project="", name=run_name, group=args.group_name, mode=mode, dir=base_dir,tags=["task_" + args.task,env.cfg.task_name])
-
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':

@@ -40,6 +40,8 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 
 def class_to_dict(obj) -> dict:
     if not  hasattr(obj,"__dict__"):
+        if isinstance(obj, dict):
+            return {key: class_to_dict(val) for key, val in obj.items()}
         return obj
     result = {}
     for key in dir(obj):
@@ -157,6 +159,8 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         raise ValueError("No runs in this directory: " + root)
     if load_run==-1:
         load_run = last_run
+    elif os.path.isabs(str(load_run)):
+        load_run = str(load_run)
     else:
         load_run = os.path.join(root, load_run)
 
@@ -189,6 +193,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             cfg_train.runner.experiment_name = args.experiment_name
         if args.run_name is not None:
             cfg_train.runner.run_name = args.run_name
+        if hasattr(args, "group_name") and args.group_name is not None:
+            cfg_train.runner.wandb_group = args.group_name
         if args.load_run is not None:
             cfg_train.runner.load_run = args.load_run
         if args.checkpoint is not None:

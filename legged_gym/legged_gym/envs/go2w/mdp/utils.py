@@ -8,11 +8,31 @@ def cfg_term(env, cfg_name, term_name):
     if manager_cfg is None:
         return None
     term = getattr(manager_cfg, term_name, None)
+    if term is None:
+        term = _nested_cfg_term(manager_cfg, term_name)
     if isinstance(term, dict) and term.get("enabled", True) is False:
         return None
     if getattr(term, "enabled", True) is False:
         return None
     return term
+
+
+def _nested_cfg_term(manager_cfg, term_name):
+    cls = manager_cfg if isinstance(manager_cfg, type) else manager_cfg.__class__
+    for group_name in dir(cls):
+        if group_name.startswith("_"):
+            continue
+        group_cfg = getattr(cls, group_name)
+        if not isinstance(group_cfg, type):
+            continue
+        term = getattr(group_cfg, term_name, None)
+        if term is not None:
+            return term
+        prefixed = f"{group_name}_{term_name}"
+        term = getattr(group_cfg, prefixed, None)
+        if term is not None:
+            return term
+    return None
 
 
 def cfg_term_params(env, cfg_name, term_name, default=None):
@@ -45,8 +65,11 @@ def call_cfg_term(env, cfg_name, term_name, *args, default=None, **kwargs):
 def manager_term_params(env, manager_name, term_name, default=None):
     manager = getattr(env, f"{manager_name}_manager", None)
     if manager is not None:
-        for name, term in zip(manager.active_terms, manager._terms):
-            if name == term_name:
+        manager_terms = getattr(manager, "_flat_group_terms", None)
+        if manager_terms is None:
+            manager_terms = list(zip(manager.active_terms, manager._terms))
+        for name, term in manager_terms:
+            if name == term_name or name.endswith(f"_{term_name}"):
                 return dict(term.params)
     cfg_names = {
         "action": "actions",

@@ -28,10 +28,13 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+"""Runner entry points.
+
+The package default is the new manager-friendly TensorDict runner.  Legacy
+specialized runners are kept as source files but are no longer imported here,
+because they depend on the pre-manager storage and monolithic policy API.
+"""
+
 from .on_policy_runner import OnPolicyRunner
-from .on_policy_runner_lya import OnPolicyRunnerLya
-from .on_policy_runner_hacloco import OnPolicyRunnerHACLOCO
-from .on_policy_runner_lip import OnPolicyRunnerLip
-from .on_policy_runner_him import OnPolicyRunnerHim
-from .on_policy_runner_lyapd import OnPolicyRunnerLyaPD
-from .on_policy_runner_lyaru import OnPolicyRunnerLyaRU
+
+__all__ = ["OnPolicyRunner"]

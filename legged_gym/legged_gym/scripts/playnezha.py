@@ -29,20 +29,15 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import os
-import sys  
-sys.path.append("/home/hu/csq/DreamWaQ/legged_gym")
 import matplotlib
 import isaacgym
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs import *
-from legged_gym.utils import  get_args, export_policy_as_jit, task_registry , Logger
-from legged_gym.utils.helpers import export_policy_as_jit_actor,export_policy_as_jit_encoder,class_to_dict, export_vae_policy_as_jit, disable_manager_randomization
-from isaacgym import gymtorch, gymapi, gymutil
-from isaacgym.torch_utils import quat_rotate
+from legged_gym.utils import  get_args, task_registry , Logger
+from legged_gym.utils.helpers import export_vae_policy_as_jit, disable_manager_randomization
 
 import numpy as np
 import torch
-import pickle
 
 
 # === 手动四元数旋转函数（与 quat_rotate 等价） ===
@@ -89,13 +84,6 @@ def quaternion2rpy(q):
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
-    class_to_dict(env_cfg)
-    class_to_dict(train_cfg)
-    
-    with open('env_cfg.pkl', 'wb') as f:
-        pickle.dump(class_to_dict(env_cfg), f)
-    with open('train_cfg.pkl', 'wb') as f:
-        pickle.dump(train_cfg, f)
     # override some parameters for testing
     # env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
     # env_cfg.terrain.num_rows = 5

@@ -28,8 +28,22 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from .actor_critic import ActorCritic
-from .actor_critic_recurrent import ActorCriticRecurrent
-from .actor_critic_DWAQ import ActorCritic_DWAQ
-from .LyaCritic.lya_critic import LyaCritic
-from .LipschitzActorCritic.lipschitz_actor_critic import LipschitzActorCritic
+"""Composable neural-network building blocks."""
+
+from .cnn import CNN
+from .distribution import Distribution, GaussianDistribution, HeteroscedasticGaussianDistribution
+from .mlp import MLP
+from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
+from .rnn import RNN, HiddenState
+
+__all__ = [
+    "CNN",
+    "MLP",
+    "RNN",
+    "Distribution",
+    "EmpiricalDiscountedVariationNormalization",
+    "EmpiricalNormalization",
+    "GaussianDistribution",
+    "HeteroscedasticGaussianDistribution",
+    "HiddenState",
+]

@@ -25,6 +25,16 @@ class ManagerTermCfg:
     env_arg: bool = False
 
 
+class ObsGroup:
+    """Marker base for grouped observation terms.
+
+    Subclasses are parsed by :class:`ObservationManager` as ordered observation
+    groups. The group name defaults to the class attribute name in the config.
+    """
+
+    mode: Optional[str] = None
+
+
 class ManagerBase:
     """Small manager base class for Isaac Gym environments."""
 

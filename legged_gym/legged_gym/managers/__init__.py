@@ -4,7 +4,7 @@ The managers in this package keep the existing Isaac Gym/rsl_rl API intact while
 moving task behavior out of the monolithic environment class.
 """
 
-from .manager_base import ManagerBase, ManagerTermCfg
+from .manager_base import ManagerBase, ManagerTermCfg, ObsGroup
 from .action_manager import ActionManager
 from .command_manager import CommandManager
 from .event_manager import EventManager
@@ -18,6 +18,7 @@ __all__ = [
     "EventManager",
     "ManagerBase",
     "ManagerTermCfg",
+    "ObsGroup",
     "ObservationManager",
     "RewardManager",
     "TerminationManager",

@@ -28,24 +28,21 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import os
-from datetime import datetime
-from typing import Tuple
-import torch
-import numpy as np
+from __future__ import annotations
 
-from rsl_rl.env.__init__ import VecEnv
-from rsl_rl.runners.__init__ import OnPolicyRunner
-from rsl_rl.runners.__init__ import OnPolicyRunnerLya
-from rsl_rl.runners.__init__ import OnPolicyRunnerHACLOCO
-from rsl_rl.runners.__init__ import OnPolicyRunnerLip
-from rsl_rl.runners.__init__ import OnPolicyRunnerHim
-from rsl_rl.runners.__init__ import OnPolicyRunnerLyaPD
-from rsl_rl.runners.__init__ import OnPolicyRunnerLyaRU
+import os
+import copy
+from datetime import datetime
+from typing import TYPE_CHECKING, Tuple
+
+from rsl_rl.utils import resolve_callable
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
 from legged_gym.envs.base.base_config import BaseConfig
+
+if TYPE_CHECKING:
+    from rsl_rl.env import VecEnv
 
 class TaskRegistry():
     def __init__(self):
@@ -53,12 +50,12 @@ class TaskRegistry():
         self.env_cfgs = {}
         self.train_cfgs = {}
     
-    def register(self, name: str, task_class: VecEnv, env_cfg: BaseConfig, train_cfg: BaseConfig):
+    def register(self, name: str, task_class: "VecEnv", env_cfg: BaseConfig, train_cfg: BaseConfig):
         self.task_classes[name] = task_class
         self.env_cfgs[name] = env_cfg
         self.train_cfgs[name] = train_cfg
     
-    def get_task_class(self, name: str) -> VecEnv:
+    def get_task_class(self, name: str) -> "VecEnv":
         return self.task_classes[name]
     
     def get_cfgs(self, name) -> Tuple[BaseConfig, BaseConfig]:
@@ -68,7 +65,7 @@ class TaskRegistry():
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
     
-    def make_env(self, name, args=None, env_cfg=None) -> Tuple[VecEnv, BaseConfig]:
+    def make_env(self, name, args=None, env_cfg=None) -> Tuple["VecEnv", BaseConfig]:
         """ Creates an environment either from a registered namme or from the provided config file.
 
         Args:
@@ -149,13 +146,23 @@ class TaskRegistry():
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         
-        train_cfg_dict = class_to_dict(train_cfg)
+        train_cfg_dict = copy.deepcopy(class_to_dict(train_cfg))
+        self._fill_runner_top_level_cfg(train_cfg_dict)
+        self._inject_obs_groups_from_env(train_cfg_dict, env)
+        tags = list(train_cfg_dict.get("wandb_tags", []))
+        tags.extend([f"task_{name}", getattr(env.cfg, "task_name", "")])
+        train_cfg_dict["wandb_tags"] = [tag for tag in tags if tag]
 
         # === 根据 config 中的 runner.class_name 选择 runner ===
-        runner_class_name = getattr(train_cfg.runner, "runner_class_name", "OnPolicyRunner")
-        runner_class = eval(runner_class_name)  # "OnPolicyRunnerHACLOCO" -> class
+        runner_class_name = getattr(train_cfg.runner, "runner_class_name", "rsl_rl.runners:OnPolicyRunner")
+        runner_class = resolve_callable(runner_class_name)
 
-        runner = runner_class(env, train_cfg_dict, log_dir, device=args.rl_device)
+        runner_env = env
+        if "actor" in train_cfg_dict and "critic" in train_cfg_dict:
+            from legged_gym.utils.rsl_rl_adapter import RslRlVecEnvAdapter
+
+            runner_env = RslRlVecEnvAdapter(env)
+        runner = runner_class(runner_env, train_cfg_dict, log_dir, device=args.rl_device)
         # runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
 
         #save resume path before creating a new log_dir
@@ -166,6 +173,36 @@ class TaskRegistry():
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
         return runner, train_cfg
+
+
+
+
+    @staticmethod
+    def _fill_runner_top_level_cfg(cfg):
+        runner_cfg = cfg.get("runner", {})
+        cfg["num_steps_per_env"] = runner_cfg.get("num_steps_per_env", cfg.get("num_steps_per_env", 24))
+        cfg["save_interval"] = runner_cfg.get("save_interval", cfg.get("save_interval", 500))
+        cfg["run_name"] = runner_cfg.get("run_name", cfg.get("run_name", ""))
+        cfg["logger"] = runner_cfg.get("logger", cfg.get("logger", "tensorboard"))
+        cfg["wandb_project"] = runner_cfg.get(
+            "wandb_project",
+            cfg.get("wandb_project", runner_cfg.get("experiment_name", "legged_gym")),
+        )
+        cfg["wandb_group"] = runner_cfg.get("wandb_group", cfg.get("wandb_group", None))
+        cfg["wandb_mode"] = runner_cfg.get("wandb_mode", cfg.get("wandb_mode", "online"))
+        cfg["wandb_tags"] = runner_cfg.get("wandb_tags", cfg.get("wandb_tags", []))
+        cfg["multi_gpu"] = cfg.get("multi_gpu", None)
+
+    @staticmethod
+    def _inject_obs_groups_from_env(train_cfg_dict, env):
+
+        if train_cfg_dict.get("obs_groups"):
+            return
+        observation_manager = getattr(env, "observation_manager", None)
+        obs_groups = getattr(observation_manager, "obs_groups", None)
+        if obs_groups:
+            train_cfg_dict["obs_groups"] = obs_groups
+
 
 # make global task registry
 task_registry = TaskRegistry()

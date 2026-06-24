@@ -1,60 +1,93 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from abc import ABC, abstractmethod
+
+from __future__ import annotations
+
 import torch
-from typing import Tuple, Union
+from abc import ABC, abstractmethod
+from tensordict import TensorDict
 
-# minimal interface of the environment
+
 class VecEnv(ABC):
+    """Abstract class for a vectorized environment.
+
+    The vectorized environment is a collection of environments that are synchronized. This means that the same type of
+    action is applied to all environments and the same type of observation is returned from all environments.
+    """
+
     num_envs: int
-    num_obs: int
-    num_privileged_obs: int
+    """Number of environments."""
+
     num_actions: int
-    max_episode_length: int
-    privileged_obs_buf: torch.Tensor
-    obs_buf: torch.Tensor 
-    rew_buf: torch.Tensor
-    reset_buf: torch.Tensor
-    episode_length_buf: torch.Tensor # current episode duration
-    extras: dict
-    device: torch.device
+    """Number of actions."""
+
+    max_episode_length: int | torch.Tensor
+    """Maximum episode length.
+
+    The maximum episode length can be a scalar or a tensor. If it is a scalar, it is the same for all environments.
+    If it is a tensor, it is the maximum episode length for each environment. This is useful for dynamic episode
+    lengths.
+    """
+
+    episode_length_buf: torch.Tensor
+    """Buffer for current episode lengths."""
+
+    device: torch.device | str
+    """Device to use."""
+
+    cfg: dict | object
+    """Configuration object."""
+
     @abstractmethod
-    def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, Union[torch.Tensor, None], torch.Tensor, torch.Tensor, dict]:
-        pass
+    def get_observations(self) -> TensorDict:
+        """Return the current observations.
+
+        Returns:
+            The observations from the environment.
+        """
+        raise NotImplementedError
+
     @abstractmethod
-    def reset(self, env_ids: Union[list, torch.Tensor]):
-        pass
-    @abstractmethod
-    def get_observations(self) -> torch.Tensor:
-        pass
-    @abstractmethod
-    def get_privileged_observations(self) -> Union[torch.Tensor, None]:
-        pass
+    def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        """Apply input action to the environment.
+
+        Args:
+            actions: Input actions to apply. Shape: (num_envs, num_actions)
+
+        Returns:
+            observations: Observations from the environment.
+            rewards: Rewards from the environment. Shape: (num_envs,)
+            dones: Done flags from the environment. Shape: (num_envs,)
+            extras: Extra information from the environment.
+
+        Observations:
+            The observations TensorDict usually contains multiple observation groups. The `obs_groups`
+            dictionary of the runner configuration specifies which observation groups are used for which
+            purpose, i.e., it maps from required observation sets (e.g. actor) to lists of observation groups.
+            The observation sets (keys of the `obs_groups` dictionary) currently used by rsl_rl are:
+
+            - "actor": Specified observation groups are used as input to the actor model.
+            - "critic": Specified observation groups are used as input to the critic model.
+            - "student": Specified observation groups are used as input to the student model.
+            - "teacher": Specified observation groups are used as input to the teacher model.
+            - "rnd_state": Specified observation groups are used as input to the RND extension.
+
+            Incomplete or incorrect configurations are handled in the `resolve_obs_groups()` function in
+            `rsl_rl/utils/utils.py`, which provides detailed information on the expected configuration.
+
+        Extras:
+            The extras dictionary includes metrics such as the episode reward, episode length, etc. The following
+            dictionary keys are used by rsl_rl:
+
+            - "time_outs" (torch.Tensor): Timeouts for the environments. These correspond to terminations that
+               happen due to time limits and not due to the environment reaching a terminal state. This is useful
+               for environments that have a fixed episode length.
+
+            - "log" (dict[str, float | torch.Tensor]): Additional information for logging and debugging purposes.
+               The key should be a string and start with "/" for namespacing. The value can be a scalar or a
+               tensor. If it is a tensor, the mean of the tensor is used for logging.
+        """
+        raise NotImplementedError

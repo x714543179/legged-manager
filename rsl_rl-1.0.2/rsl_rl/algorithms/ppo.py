@@ -1,78 +1,94 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+
+from __future__ import annotations
+
+import copy
 import torch
 import torch.nn as nn
-import torch.optim as optim
+from itertools import chain
+from tensordict import TensorDict
 
-from rsl_rl.modules import ActorCritic_DWAQ
-from rsl_rl.modules import ActorCritic
+from rsl_rl.env import VecEnv
+from rsl_rl.models import ActorModel, MLPModel
 from rsl_rl.storage import RolloutStorage
+from rsl_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer, construct_actor_with_shell
+
 
 class PPO:
-    actor_critic: ActorCritic_DWAQ
-    def __init__(self,
-                 actor_critic,
-                 num_learning_epochs=1,
-                 num_mini_batches=1,
-                 clip_param=0.2,
-                 gamma=0.99,
-                 lam=0.95,
-                 value_loss_coef=1.0,
-                 entropy_coef=0.0,
-                 learning_rate=1e-3,
-                 max_grad_norm=1.0,
-                 use_clipped_value_loss=True,
-                 schedule="fixed",
-                 desired_kl=0.01,
-                 device='cpu',
-                 sym_loss=False,
-                 obs_permutation=None,
-                 act_permutation=None,
-                 frame_stack=1,
-                 sym_coef=1.0,
-                 ):
+    """Proximal Policy Optimization algorithm.
 
+    Reference:
+        - Schulman et al. "Proximal policy optimization algorithms." arXiv preprint arXiv:1707.06347 (2017).
+    """
+
+    actor: MLPModel | ActorModel
+    """The actor model."""
+
+    critic: MLPModel
+    """The critic model."""
+
+    def __init__(
+        self,
+        actor: ActorModel,
+        critic: MLPModel,
+        storage: RolloutStorage,
+        num_learning_epochs: int = 5,
+        num_mini_batches: int = 4,
+        clip_param: float = 0.2,
+        gamma: float = 0.99,
+        lam: float = 0.95,
+        value_loss_coef: float = 1.0,
+        entropy_coef: float = 0.01,
+        learning_rate: float = 0.001,
+        max_grad_norm: float = 1.0,
+        optimizer: str = "adam",
+        use_clipped_value_loss: bool = True,
+        schedule: str = "adaptive",
+        desired_kl: float = 0.01,
+        normalize_advantage_per_mini_batch: bool = False,
+        min_policy_std: list[float] | float | None = None,
+        device: str = "cpu",
+        # RND parameters
+        rnd_cfg: dict | None = None,
+        # Legacy compatibility argument (ignored).
+        symmetry_cfg: dict | None = None,
+        # Distributed training parameters
+        multi_gpu_cfg: dict | None = None,
+        # Plugin list (instantiated by construct_algorithm, on_init called separately)
+        plugins: list | None = None,
+    ) -> None:
+        """Initialize the algorithm with models, storage, and optimization settings."""
+        # Device-related parameters
         self.device = device
+        self.is_multi_gpu = multi_gpu_cfg is not None
 
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
-        
+        # Multi-GPU parameters
+        if multi_gpu_cfg is not None:
+            self.gpu_global_rank = multi_gpu_cfg["global_rank"]
+            self.gpu_world_size = multi_gpu_cfg["world_size"]
+        else:
+            self.gpu_global_rank = 0
+            self.gpu_world_size = 1
+
+        # Keep signature backward-compatible, but symmetry is disabled in this PPO.
+        _ = symmetry_cfg
 
         # PPO components
-        self.actor_critic = actor_critic
-        self.actor_critic.to(self.device)
-        self.storage = None # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
-        # k_lr = learning_rate * 0.01
+        self.actor = actor.to(self.device)
+        self.critic = critic.to(self.device)
+
+        # Create the optimizer
+        self.optimizer = resolve_optimizer(optimizer)(
+            chain(self.actor.parameters(), self.critic.parameters()),
+            lr=learning_rate,
+        )  # type: ignore
+
+        # Add storage
+        self.storage = storage
         self.transition = RolloutStorage.Transition()
 
         # PPO parameters
@@ -85,227 +101,500 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
-        
-        self.sym_loss = sym_loss
-        self.sym_coef = sym_coef
+        self.desired_kl = desired_kl
+        self.schedule = schedule
+        self.learning_rate = learning_rate
+        self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.min_policy_std = min_policy_std
 
-        self.act_perm_mat = None
-        self.obs_perm_mat = None
-        self.obs_hist_perm_mat = None
-        if self.sym_loss:
-            if obs_permutation is None or act_permutation is None:
-                raise ValueError("sym_loss=True requires both obs_permutation and act_permutation.")
-            self.act_perm_mat = self._build_perm_mat(act_permutation)
-            self.obs_perm_mat = self._build_perm_mat(obs_permutation)
+        self.plugins: list = list(plugins) if plugins else []
+        # on_init is NOT called here — construct_algorithm calls it after env is available
 
-            if frame_stack < 1:
-                raise ValueError("frame_stack must be >= 1 when sym_loss=True.")
-            obs_hist_permutation = []
-            obs_dim = len(obs_permutation)
-            for frame_idx in range(frame_stack):
-                offset = frame_idx * obs_dim
-                for perm in obs_permutation:
-                    sign = -1.0 if perm < 0 else 1.0
-                    obs_hist_permutation.append(sign * (abs(perm) + offset))
-            self.obs_hist_perm_mat = self._build_perm_mat(obs_hist_permutation)
 
-    def _build_perm_mat(self, permutation):
-        perm_len = len(permutation)
-        perm_mat = torch.zeros((perm_len, perm_len), device=self.device)
-        for col_idx, perm in enumerate(permutation):
-            row_idx = int(abs(perm))
-            if row_idx >= perm_len:
-                raise ValueError(f"Permutation index {row_idx} out of range for length {perm_len}.")
-            sign = -1.0 if perm < 0 else 1.0
-            perm_mat[row_idx, col_idx] = sign
-        return perm_mat
+    # region Rollout Environment Interaction and Return Computation 
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape, self.device)
-
-    def test_mode(self):
-        self.actor_critic.test()
-    
-    def train_mode(self):
-        self.actor_critic.train()
-
-    def act(self, obs, critic_obs, prev_critic_obs, obs_history):
-        # if self.actor_critic.is_recurrent:
-        #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
+    def act(self, obs: TensorDict) -> torch.Tensor:
+        """Sample actions and store transition data."""
+        # Record the hidden states for recurrent policies
+        self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
         # Compute the actions and values
-
-        # self.transition.actions = self.actor_critic.act(obs,obs_history).detach()
-        # 替换为：
-        result = self.actor_critic.act(obs, obs_history)
-        if isinstance(result, tuple):
-            actions, grad_norm = result
-            self.transition.actions = actions
-            # self.transition.grad_norm = grad_norm
-        else:
-            self.transition.actions = result
-            # 兼容非 Lipschitz 策略
-            # if hasattr(self.transition, "grad_norm"):
-                # self.transition.grad_norm = torch.zeros(1, device=self.device)
-
-        with torch.inference_mode():
-            self.transition.values = self.actor_critic.evaluate(critic_obs)
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
-        # need to record obs and critic_obs before env.step()
+        self.transition.actions = self.actor(obs, stochastic_output=True)["actions"].detach()
+        self.transition.values = self.critic(obs).detach()
+        self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()  # type: ignore
+        self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
+        # Record observations before env.step()
         self.transition.observations = obs
-        self.transition.observation_history = obs_history
-        self.transition.critic_observations = critic_obs
-        self.transition.prev_critic_obs = prev_critic_obs
-        # print("第0个机器人的动作是",torch.squeeze(self.transition.actions[0]))
-        return self.transition.actions
-    
-    def process_env_step(self, rewards, dones, infos, next_obs, next_obs_hist, costs):
+        return self.transition.actions  # type: ignore
 
-        self.transition.next_observations = next_obs
-        self.transition.next_observations_hist = next_obs_hist
-        self.transition.costs = costs
+    def process_env_step(
+        self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
+    ) -> None:
+        """Record one environment step and update the normalizers."""
+        # Update the normalizers
+        self.actor.update_normalization(obs)
+        self.critic.update_normalization(obs)
 
+        # Record the rewards and dones
+        # Note: We clone here because later on we bootstrap the rewards based on timeouts
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+
         # Bootstrapping on time outs
-        if 'time_outs' in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+        if "time_outs" in extras:
+            self.transition.rewards += self.gamma * torch.squeeze(
+                self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device),  # type: ignore
+                1,
+            )
 
         # Record the transition
-        self.storage.add_transitions(self.transition)
+        self.storage.add_transition(self.transition)
         self.transition.clear()
-        self.actor_critic.reset(dones)
+        self.actor.reset(dones)
+        self.critic.reset(dones)
+
+        # post-rollout hook (currently unused; reserved for plugins that need per-step processing)
+
+
+    def compute_returns(self, obs: TensorDict) -> None:
+        """Compute return and advantage targets from stored transitions."""
+        st = self.storage
+        # Compute value for the last step
+        last_values = self.critic(obs).detach()
+        # Compute returns and advantages
+        advantage = 0
+        for step in reversed(range(st.num_transitions_per_env)):
+            # If we are at the last step, bootstrap the return value
+            next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
+            # 1 if we are not in a terminal state, 0 otherwise
+            next_is_not_terminal = 1.0 - st.dones[step].float()
+            # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
+            delta = st.rewards[step] + next_is_not_terminal * self.gamma * next_values - st.values[step]
+            # Advantage: A(s_t, a_t) = delta_t + gamma * lambda * A(s_{t+1}, a_{t+1})
+            advantage = delta + next_is_not_terminal * self.gamma * self.lam * advantage
+            # Return: R_t = A(s_t, a_t) + V(s_t)
+            st.returns[step] = advantage + st.values[step]
+        # Compute the advantages
+        st.advantages = st.returns - st.values
+        # Normalize the advantages if per minibatch normalization is not used
+        if not self.normalize_advantage_per_mini_batch:
+            st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
+    #endregion 
+    # region resolve Loss Computation and Optimization
+    def _register_loss_metrics(self) -> dict[str, float]:
+        """Register running metric buffer for one update iteration.
+
+        Metric keys are inferred dynamically from ``loss_results`` in
+        ``_accumulate_loss_metrics``.
+        """
+        return {}
+
+    def _extract_metric_values_from_loss_results(
+        self,
+        obj: dict | torch.Tensor | float | int,
+        prefix: str = "",
+    ) -> dict[str, float]:
+        """Recursively parse nested loss dicts into scalar metrics.
+
+        Rules:
+        - dict: recurse with path-like keys
+        - Tensor: scalar -> item, otherwise mean().item()
+        - float/int: cast to float
+        """
+        parsed: dict[str, float] = {}
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                child_prefix = f"{prefix}/{key}" if prefix else str(key)
+                parsed.update(self._extract_metric_values_from_loss_results(value, child_prefix))
+            return parsed
+
+        if isinstance(obj, torch.Tensor):
+            if obj.numel() == 0:
+                return parsed
+            parsed[prefix] = obj.item() if obj.numel() == 1 else obj.mean().item()
+            return parsed
+
+        if isinstance(obj, (float, int)):
+            parsed[prefix] = float(obj)
+            return parsed
+
+        return parsed
+
+    def _accumulate_loss_metrics(
+        self,
+        metrics: dict[str, float],
+        loss_results: dict,
+    ) -> None:
+        """Accumulate per-batch loss values into running metric sums.
+
+        This parser accepts nested dictionaries (e.g. output of ``_compute_loss``)
+        and resolves metric values by key, avoiding repetitive variable unpacking
+        at the call site.
+        """
+        parsed_metrics = self._extract_metric_values_from_loss_results(loss_results)
+
+        for key, value in parsed_metrics.items():
+            metrics[key] = metrics.get(key, 0.0) + value
+
+    @staticmethod
+    def _finalize_loss_metrics(metrics: dict[str, float], num_updates: int) -> dict[str, float]:
+        """Normalize running sums by update count and return logging dict."""
+        if num_updates <= 0:
+            raise ValueError(f"num_updates must be > 0, got {num_updates}")
+        return {name: value / num_updates for name, value in metrics.items()}
+    # endregion
     
+    def _forward_model(self, batch: TensorDict, original_batch_size: int) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
+        """Run actor/critic forward pass for one mini-batch."""
+        forward_dict = self.actor(
+            batch.observations,
+            masks=batch.masks,
+            hidden_state=batch.hidden_states[0],
+            stochastic_output=True,
+            train_mode=True,
+        )
+        actions_log_prob = self.actor.get_output_log_prob(batch.actions)  # type: ignore
+        values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
+        distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
+        entropy = self.actor.output_entropy[:original_batch_size]
 
-    def compute_returns(self, last_critic_obs):
-        last_values= self.actor_critic.evaluate(last_critic_obs).detach()
-        self.storage.compute_returns(last_values, self.gamma, self.lam)
+        extra = forward_dict.get("extra", {}) if isinstance(forward_dict, dict) else {}
 
-    def update(self,beta=1):
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_autoenc_loss = 0
-        # if self.actor_critic.is_recurrent:
-        #     generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        # else:
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, next_obs_batch, critic_obs_batch, prev_critic_obs_batch, obs_hist_batch, next_obs_hist_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, costs_batch, K_batch, hid_states_batch, masks_batch in generator:
+        # Prefer the named-loss dict; fall back to legacy scalar so old backbones still work.
+        aux_losses: dict = extra.get("aux_losses") or {}
+        if not aux_losses and extra.get("aux_loss") is not None:
+            aux_losses = {"aux_loss": extra["aux_loss"]}
 
+        return {
+            "actions_log_prob": actions_log_prob,
+            "values": values,
+            "distribution_params": distribution_params,
+            "entropy": entropy,
+            "aux_losses": aux_losses,
+        }
 
-                self.actor_critic.act(obs_batch, obs_hist_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
+    def _adjust_learning_rate_based_on_kl(self, batch: TensorDict, distribution_params: tuple[torch.Tensor, ...]) -> None:
+        """Adapt learning rate based on KL divergence under adaptive schedule."""
+        if self.desired_kl is None or self.schedule != "adaptive":
+            return
 
-                sym_loss = torch.tensor(0.0, device=self.device)
-                if self.sym_loss:
-                    if obs_batch.shape[-1] != self.obs_perm_mat.shape[0]:
-                        raise ValueError(
-                            f"obs_permutation length {self.obs_perm_mat.shape[0]} does not match obs dim {obs_batch.shape[-1]}."
-                        )
-                    if obs_hist_batch.shape[-1] != self.obs_hist_perm_mat.shape[0]:
-                        raise ValueError(
-                            f"obs history permutation length {self.obs_hist_perm_mat.shape[0]} does not match obs_hist dim {obs_hist_batch.shape[-1]}."
-                        )
+        with torch.inference_mode():
+            kl = self.actor.get_kl_divergence(batch.old_distribution_params, distribution_params)  # type: ignore
+            kl_mean = torch.mean(kl)
 
-                    mirror_obs_batch = torch.matmul(obs_batch, self.obs_perm_mat)
-                    mirror_obs_hist_batch = torch.matmul(obs_hist_batch, self.obs_hist_perm_mat)
-                    self.actor_critic.act(
-                        mirror_obs_batch,
-                        mirror_obs_hist_batch,
-                        deterministic_for_grad=True,
-                        masks=masks_batch,
-                        hidden_states=hid_states_batch[0],
-                    )
-                    mirror_mu_batch = self.actor_critic.action_mean
-                    mapped_mirror_mu_batch = torch.matmul(mirror_mu_batch, self.act_perm_mat)
-                    sym_loss = (mu_batch - mapped_mirror_mu_batch).pow(2).mean()
+            if self.is_multi_gpu:
+                torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
+                kl_mean /= self.gpu_world_size
 
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
-                    with torch.inference_mode():
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = torch.mean(kl)
+            if self.gpu_global_rank == 0:
+                if kl_mean > self.desired_kl * 2.0:
+                    self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                    self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
-                        for param_group in self.optimizer.param_groups:
-                            param_group['lr'] = self.learning_rate
+            if self.is_multi_gpu:
+                lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                torch.distributed.broadcast(lr_tensor, src=0)
+                self.learning_rate = lr_tensor.item()
 
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = self.learning_rate
 
-                #Beta VAE loss
-                code,code_vel,decode,mean_vel,logvar_vel,mean_latent,logvar_latent = self.actor_critic.cenet_forward(obs_hist_batch)
-                
-                vel_target = prev_critic_obs_batch[:,73:76]
-                decode_target = obs_batch
-                vel_target.requires_grad = False
-                decode_target.requires_grad = False
-                autoenc_loss = (nn.MSELoss()(code_vel,vel_target) + nn.MSELoss()(decode,decode_target) + beta*(-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())))/self.num_mini_batches
-                # estimation_loss = (code[:,0:3] - prev_critic_obs_batch[:,45:48]).pow(2).mean()
-                # reconst_loss = (decode - obs_batch).pow(2).mean()
-                # latent_loss = beta*(-0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp()))/mean.shape[0]
-                # autoenc_loss = estimation_loss + reconst_loss + latent_loss
-                # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                surrogate = -torch.squeeze(advantages_batch) * ratio
-                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                                1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+    def _compute_ppo_loss(self, forward_results: dict, mb_rollout_data: dict) -> dict[str, torch.Tensor]:
+        """Compute PPO objective for one mini-batch."""
+        batch: TensorDict = mb_rollout_data["batch"]
+        original_batch_size: int = mb_rollout_data["original_batch_size"]
 
-                # Value function loss
-                if self.use_clipped_value_loss:
-                    value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                                                    self.clip_param)
-                    value_losses = (value_batch - returns_batch).pow(2)
-                    value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
-                else:
-                    value_loss = (returns_batch - value_batch).pow(2).mean()
+        actions_log_prob = forward_results["actions_log_prob"]
+        values = forward_results["values"]
+        entropy = forward_results["entropy"]
+        distribution_params = forward_results["distribution_params"]
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + autoenc_loss + self.sym_coef * sym_loss
+        self._adjust_learning_rate_based_on_kl(batch, distribution_params)
 
-                # Gradient step
-                self.optimizer.zero_grad()
-                loss.backward()
+        ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))  # type: ignore
+        surrogate = -torch.squeeze(batch.advantages) * ratio  # type: ignore
+        surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(  # type: ignore
+            ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+        )
+        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-                # === ✅ 打印梯度统计 ===
-                # if hasattr(self.actor_critic, "lcn"):
-                #     total_grad = 0.0
-                #     count = 0
-                #     for name, p in self.actor_critic.named_parameters():
-                #         if p.grad is not None:
-                #             grad_mean = p.grad.mean().item()
-                #             grad_absmean = p.grad.abs().mean().item()
-                #             if "lcn" in name:
-                #                 print(f"[LCN] {name:40s} grad_mean={grad_mean:+.4e} | abs_mean={grad_absmean:.4e}")
-                #             elif "actor" in name:
-                #                 print(f"[ACTOR] {name:38s} grad_mean={grad_mean:+.4e} | abs_mean={grad_absmean:.4e}")
-                #             elif "critic" in name:
-                #                 print(f"[CRITIC] {name:37s} grad_mean={grad_mean:+.4e} | abs_mean={grad_absmean:.4e}")
-                #             total_grad += grad_absmean
-                #             count += 1
-                #     if count > 0:
-                #         print(f"🧠 mean(|grad|) across network = {total_grad / count:.4e}")
-                #     print("-" * 100)
+        if self.use_clipped_value_loss:
+            value_clipped = batch.values + (values - batch.values).clamp(-self.clip_param, self.clip_param)
+            value_losses = (values - batch.returns).pow(2)
+            value_losses_clipped = (value_clipped - batch.returns).pow(2)
+            value_loss = torch.max(value_losses, value_losses_clipped).mean()
+        else:
+            value_loss = (batch.returns - values).pow(2).mean()
 
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+        ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+        out_dict = {
+            "ppo_loss": ppo_loss,
+            "surrogate_loss": surrogate_loss,
+            "value_loss": value_loss,
+            "entropy": entropy,
+        }
 
-                mean_value_loss += value_loss.item()
-                mean_surrogate_loss += surrogate_loss.item()
-                mean_autoenc_loss += autoenc_loss.item()
+        return out_dict
 
+    def _compute_loss(self, mb_forward_results: dict, mb_rollout_data: dict) -> dict:
+        """Compute total loss and return nested loss dicts for logging/extension."""
+        ppo_loss_dict = self._compute_ppo_loss(mb_forward_results, mb_rollout_data)
+        loss = ppo_loss_dict["ppo_loss"]
+        aux_loss_dict: dict[str, torch.Tensor] = dict(mb_forward_results.get("aux_losses", {}))
+        if aux_loss_dict:
+            loss = loss + sum(aux_loss_dict.values())  # type: ignore[arg-type]
+
+        return {
+            "loss": loss,
+            "ppo_loss_dict": ppo_loss_dict,
+            "aux_losses": aux_loss_dict,
+        }
+
+    def _expand_min_policy_std(self, target: torch.Tensor) -> torch.Tensor:
+        """Return the configured minimum std broadcast to a distribution parameter tensor."""
+        if self.min_policy_std is None:
+            raise RuntimeError("min_policy_std is not configured")
+
+        min_std = torch.as_tensor(self.min_policy_std, device=target.device, dtype=target.dtype)
+        if min_std.ndim == 0:
+            min_std = min_std.unsqueeze(0)
+        min_std = torch.clamp_min(min_std, 1e-6)
+
+        if min_std.numel() == 1:
+            return min_std.expand_as(target)
+        if min_std.numel() != target.numel():
+            return min_std.min().expand_as(target)
+        return min_std.reshape_as(target)
+
+    def _clamp_policy_std(self) -> None:
+        """Clamp the actor policy std after optimizer updates to avoid std collapse."""
+        if self.min_policy_std is None:
+            return
+
+        dist = getattr(self.actor, "distribution", None)
+        if dist is None:
+            return
+
+        with torch.no_grad():
+            std_type = getattr(dist, "std_type", None)
+            if std_type == "scalar" and hasattr(dist, "std_param"):
+                target = dist.std_param
+                target.clamp_(min=self._expand_min_policy_std(target))
+            elif std_type == "log" and hasattr(dist, "log_std_param"):
+                target = dist.log_std_param
+                min_std = self._expand_min_policy_std(target)
+                target.clamp_(min=torch.log(min_std))
+
+    def update(self) -> dict[str, float]:
+        """Run optimization epochs over stored batches and return mean losses."""
+        metrics = self._register_loss_metrics()
+
+        # Get mini batch generator
+        if self.actor.is_recurrent or self.critic.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        else:
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+
+        for plugin in self.plugins:
+            plugin.on_update_start(self)
+
+        # Iterate over batches
+        for batch in generator:
+            original_batch_size = batch.observations.batch_size[0]
+            # Check if we should normalize advantages per mini batch
+            if self.normalize_advantage_per_mini_batch:
+                with torch.no_grad():
+                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)  # type: ignore
+
+            mb_forward_results = self._forward_model(batch, original_batch_size)
+            mb_rollout_data = {
+                "batch": batch,
+                "original_batch_size": original_batch_size,
+            }
+            loss_results = self._compute_loss(mb_forward_results, mb_rollout_data)
+
+            # 收集各插件的额外 loss，合并到总 loss 和日志中
+            for plugin in self.plugins:
+                extra = plugin.on_per_batch_extra_loss(self, batch)
+                if extra:
+                    loss_results["loss"] = loss_results["loss"] + sum(extra.values())
+                    loss_results.update(extra)
+
+            loss = loss_results["loss"]
+
+            # Compute the gradients for PPO
+            self.optimizer.zero_grad()
+            loss.backward()     
+
+            # Collect gradients from all GPUs
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+
+            # Apply the gradients for PPO
+            nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
+            # 让插件在 backward 后裁剪自有参数（如判别器）的梯度
+            for plugin in self.plugins:
+                plugin.on_post_backward(self)
+
+            self.optimizer.step()
+            self._clamp_policy_std()
+            # Store the losses.
+            self._accumulate_loss_metrics(
+                metrics,
+                loss_results=loss_results,
+            )
+
+        # Divide the losses by the number of updates.
         num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_value_loss /= num_updates
-        mean_surrogate_loss /= num_updates
+        loss_dict = self._finalize_loss_metrics(metrics, num_updates)
+
+        # 插件可在此追加额外 metric（如 normalizer 统计量）
+        for plugin in self.plugins:
+            loss_dict.update(plugin.on_post_update(self))
+
+        # Clear the storage
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss
+        return loss_dict
+
+    def train_mode(self) -> None:
+        """Set train mode for learnable models."""
+        self.actor.train()
+        self.critic.train()
+        for plugin in self.plugins:
+            plugin.on_train_mode(self)
+
+    def eval_mode(self) -> None:
+        """Set evaluation mode for learnable models."""
+        self.actor.eval()
+        self.critic.eval()
+        for plugin in self.plugins:
+            plugin.on_eval_mode(self)
+        
+    def save(self) -> dict:
+        """Return a dict of all models for saving."""
+        saved_dict = {
+            "actor_state_dict": self.actor.state_dict(),
+            "critic_state_dict": self.critic.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+        for plugin in self.plugins:
+            plugin.on_save(self, saved_dict)
+        return saved_dict
+
+    def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
+        """Load specified models from a saved dict."""
+        # If no load_cfg is provided, load all models and states
+        if load_cfg is None:
+            load_cfg = {
+                "actor": True,
+                "critic": True,
+                "optimizer": True,
+                "iteration": True,
+            }
+
+        # Load the specified models
+        if load_cfg.get("actor"):
+            self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
+        if load_cfg.get("critic"):
+            self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
+        if load_cfg.get("optimizer"):
+            self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+        for plugin in self.plugins:
+            plugin.on_load(self, loaded_dict)
+        return load_cfg.get("iteration", False)
+
+    def get_policy(self) -> MLPModel | ActorModel:
+        """Get the policy model."""
+        return self.actor
+
+
+    @staticmethod
+    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> PPO:
+        """Construct the PPO algorithm."""
+        actor_cfg = copy.deepcopy(cfg["actor"])
+        critic_cfg = copy.deepcopy(cfg["critic"])
+        algorithm_cfg = copy.deepcopy(cfg["algorithm"])
+        obs_groups = copy.deepcopy(cfg.get("obs_groups", {}))
+
+        # Resolve class callables
+        alg_class: type[PPO] = resolve_callable(algorithm_cfg.pop("class_name"))  # type: ignore
+        critic_class: type[MLPModel] = resolve_callable(critic_cfg.pop("class_name"))  # type: ignore
+
+        # Resolve observation groups
+        default_sets = ["actor", "critic"]
+        obs_groups = resolve_obs_groups(obs, obs_groups, default_sets)
+
+        # Explicitly ignore legacy symmetry settings in this PPO variant.
+        algorithm_cfg.pop("symmetry_cfg", None)
+        algorithm_cfg.pop("aux_modules", None)
+
+        # Initialize the policy
+        actor = construct_actor_with_shell(obs, obs_groups, actor_cfg, env.num_actions).to(device)
+        print(f"Actor Model: {actor}")
+        if algorithm_cfg.pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
+            critic_cfg["cnns"] = actor.backbone.cnns  # type: ignore
+        critic: MLPModel = critic_class(obs, obs_groups, "critic", 1, **critic_cfg).to(device)
+        print(f"Critic Model: {critic}")
+
+        # Initialize the storage
+        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+
+        # 从 config 实例化插件（on_init 在此处调用，可访问 env）
+        plugins_cfgs: list[dict] = algorithm_cfg.pop("plugins", [])
+        plugins: list = []
+        for pcfg in plugins_cfgs:
+            pcfg = dict(pcfg)
+            plugin_cls = resolve_callable(pcfg.pop("class_name"))
+            plugins.append(plugin_cls(**pcfg))
+
+        # Initialize the algorithm
+        alg: PPO = alg_class(
+            actor, critic, storage,
+            device=device,
+            plugins=plugins,
+            **algorithm_cfg,
+            multi_gpu_cfg=cfg["multi_gpu"],
+        )
+
+        for plugin in alg.plugins:
+            plugin.on_init(alg, env)
+
+        return alg
+
+    def broadcast_parameters(self) -> None:
+        """Broadcast model parameters to all GPUs."""
+        # Obtain the model parameters on current GPU
+        model_params = [self.actor.state_dict(), self.critic.state_dict()]
+        
+        # Broadcast the model parameters
+        torch.distributed.broadcast_object_list(model_params, src=0)
+        # Load the model parameters on all GPUs from source GPU
+        self.actor.load_state_dict(model_params[0])
+        self.critic.load_state_dict(model_params[1])
+
+    def reduce_parameters(self) -> None:
+        """Collect gradients from all GPUs and average them.
+
+        This function is called after the backward pass to synchronize the gradients across all GPUs.
+        """
+        # Create a tensor to store the gradients
+        all_params = chain(self.actor.parameters(), self.critic.parameters())
+
+        all_params = list(all_params)
+        grads = [param.grad.view(-1) for param in all_params if param.grad is not None]
+        all_grads = torch.cat(grads)
+        # Average the gradients across all GPUs
+        torch.distributed.all_reduce(all_grads, op=torch.distributed.ReduceOp.SUM)
+        all_grads /= self.gpu_world_size
+        # Update the gradients for all parameters with the reduced gradients
+        offset = 0
+        for param in all_params:
+            if param.grad is not None:
+                numel = param.numel()
+                # Copy data back from shared buffer
+                param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
+                # Update the offset for the next parameter
+                offset += numel

@@ -26,12 +26,15 @@ class RewardManager(ManagerBase):
     def compute(self):
         env = self.env
         env.rew_buf[:] = 0.0
+        step_metrics = env.extras.setdefault("step_metrics", {})
+        step_metrics.clear()
         for name, term in zip(self._term_names, self._terms):
             if name == "termination":
                 continue
             rew = self._call_term(term) * self._term_scale(term)
             env.rew_buf += rew
             self.episode_sums[name] += rew
+            step_metrics[f"rew_{name}"] = rew
         if env.cfg.rewards.only_positive_rewards:
             env.rew_buf[:] = torch.clip(env.rew_buf[:], min=0.0)
         if "termination" in self._term_names:
@@ -40,6 +43,7 @@ class RewardManager(ManagerBase):
             rew = self._call_term(term) * self._term_scale(term)
             env.rew_buf += rew
             self.episode_sums["termination"] += rew
+            step_metrics["rew_termination"] = rew
         return env.rew_buf
 
     def reset(self, env_ids):

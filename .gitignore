@@ -4,9 +4,11 @@
 #     https://www.atlassian.com/git/tutorials/saving-changes/gitignore
 
 # 不想上传的自定义文件夹
-/legged_gym/legged_gym/envs/go2w_HACloco/
 /legged_gym/legged_gym/envs/nezha/
 
+
+
+/legged_gym/docs/
 
 
 
@@ -65,3 +67,5 @@ runs
 *.egg-info
 __pycache__
 .codex
+env_cfg.pkl
+train_cfg.pkl

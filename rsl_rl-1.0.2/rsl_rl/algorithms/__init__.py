@@ -28,4 +28,21 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+"""Learning algorithms."""
+
 from .ppo import PPO
+from .plugins import PPOPlugin, SymmetryLossPlugin
+
+__all__ = ["PPO", "AMPPlugin", "PPOPlugin", "SymmetryLossPlugin", "TeacherKLPlugin"]
+
+
+def __getattr__(name):
+    if name == "AMPPlugin":
+        from .plugins import AMPPlugin
+
+        return AMPPlugin
+    if name == "TeacherKLPlugin":
+        from .plugins import TeacherKLPlugin
+
+        return TeacherKLPlugin
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

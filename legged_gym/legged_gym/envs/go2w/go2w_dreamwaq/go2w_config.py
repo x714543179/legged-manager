@@ -1,5 +1,5 @@
 from legged_gym.envs.base.base_config import BaseConfig
-from legged_gym.managers import ManagerTermCfg
+from legged_gym.managers import ManagerTermCfg, ObsGroup
 from legged_gym.envs.go2w import mdp
 
 class GO2WRoughCfg( BaseConfig ):
@@ -64,6 +64,87 @@ class GO2WRoughCfg( BaseConfig ):
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
         # trimesh only:
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
+        class importer:
+            terrain_type = "generator"
+            mesh_type = "trimesh"
+            max_init_terrain_level = 5
+            use_terrain_origins = True
+            rough_template = {
+                "class_name": "legged_gym.terrains.generators.rough:RoughTerrainGenerator",
+                "difficulty_range": [0.0, 1.0],
+                "sub_terrains": {
+                    "slope": {
+                        "class_name": "legged_gym.terrains.generators.rough:PyramidSlopeTerrain",
+                        "proportion": 0.1,
+                        "terrain_type": 0,
+                    },
+                    "rough_slope": {
+                        "class_name": "legged_gym.terrains.generators.rough:RandomRoughSlopeTerrain",
+                        "proportion": 0.1,
+                        "terrain_type": 1,
+                    },
+                    "stairs_down": {
+                        "class_name": "legged_gym.terrains.generators.rough:PyramidStairsTerrain",
+                        "proportion": 0.35,
+                        "inverted": True,
+                        "terrain_type": 2,
+                    },
+                    "stairs_up": {
+                        "class_name": "legged_gym.terrains.generators.rough:PyramidStairsTerrain",
+                        "proportion": 0.25,
+                        "inverted": False,
+                        "terrain_type": 3,
+                    },
+                    "discrete": {
+                        "class_name": "legged_gym.terrains.generators.rough:DiscreteObstaclesTerrain",
+                        "proportion": 0.2,
+                        "terrain_type": 4,
+                    },
+                },
+            }
+            mgdp_mix_template = {
+                "class_name": "legged_gym.terrains.generators.mix:MixTerrainGenerator",
+                "difficulty_range": [0.0, 1.0],
+                "terrain_dict": {
+                    "slope down": 0.2,
+                    "pyramid": 0.2,
+                    "stairs down": 0.2,
+                    "stairs up": 0.2,
+                    "discrete obstacles": 1.1,
+                    "hurdle": 0.2,
+                    "gap": 1.2,
+                    "ramp": 1.1,
+                    "bream": 0.0,
+                    "new stairs down": 0.3,
+                    "pit": 1.0,
+                },
+            }
+            mgdp_gap_parkour_template = {
+                "class_name": "legged_gym.terrains.generators.gap_parkour:GapParkourTerrainGenerator",
+                "difficulty_range": [0.0, 1.0],
+                "num_goals": 10,
+                "terrain_dict": {
+                    "plane": 0.0,
+                    "up_stairs": 0.0,
+                    "down_stairs": 0.0,
+                    "single-gap": 0.002,
+                    "step-stone": 0.101,
+                    "Stones-2Rows": 0.101,
+                    "balance-2Stones": 0.0,
+                    "stones-1Rows": 0.101,
+                    "single-bridge": 0.101,
+                    "step-Beams": 0.0,
+                    "Rotation-Beams": 0.0,
+                    "narrow-Beams": 0.0,
+                    "cross-Beams": 0.0,
+                    "air-Beams": 0.101,
+                    "air_stone": 0.101,
+                    "hurdle": 0.101,
+                    "ramp": 0.101,
+                    "corridor": 1.1,
+                },
+            }
+            generator = rough_template
 
     # 机器人初始状态
     class init_state:
@@ -171,34 +252,36 @@ class GO2WRoughCfg( BaseConfig ):
         )
 
     class observations:
-        imu = ManagerTermCfg(
-            func=mdp.imu,
-            env_arg=True,
-            noise=mdp.imu_noise,
-            params={
-                "latency_enabled": True,
-                "randomize_latency": True,
-                "latency_range": [1, 3],
-            },
-        )
-        command = ManagerTermCfg(func="_obs_commands")
-        motor = ManagerTermCfg(
-            func=mdp.motor,
-            env_arg=True,
-            noise=mdp.motor_noise,
-            params={
-                "latency_enabled": True,
-                "randomize_latency": True,
-                "latency_range": [1, 3],
-            },
-        )
-        dof_pos = ManagerTermCfg(func=mdp.dof_pos, env_arg=True, noise=mdp.dof_pos_noise)
-        action = ManagerTermCfg(func="_obs_actions")
+        class actor(ObsGroup):
+            imu = ManagerTermCfg(
+                func=mdp.imu,
+                env_arg=True,
+                noise=mdp.imu_noise,
+                params={
+                    "latency_enabled": True,
+                    "randomize_latency": True,
+                    "latency_range": [1, 3],
+                },
+            )
+            command = ManagerTermCfg(func="_obs_commands")
+            motor = ManagerTermCfg(
+                func=mdp.motor,
+                env_arg=True,
+                noise=mdp.motor_noise,
+                params={
+                    "latency_enabled": True,
+                    "randomize_latency": True,
+                    "latency_range": [1, 3],
+                },
+            )
+            dof_pos = ManagerTermCfg(func=mdp.dof_pos, env_arg=True, noise=mdp.dof_pos_noise)
+            action = ManagerTermCfg(func="_obs_actions")
 
-        critic_policy_obs = ManagerTermCfg(func="_obs_policy", mode="privileged")
-        critic_base_lin_vel = ManagerTermCfg(func="_obs_base_lin_vel", mode="privileged")
-        critic_contact_forces = ManagerTermCfg(func="_obs_contact_forces", mode="privileged")
-        critic_heights = ManagerTermCfg(func="_obs_height_measurements", mode="privileged")
+        class critic(ObsGroup):
+            policy = ManagerTermCfg(func="_obs_policy")
+            base_lin_vel = ManagerTermCfg(func="_obs_base_lin_vel")
+            contact_forces = ManagerTermCfg(func="_obs_contact_forces")
+            heights = ManagerTermCfg(func="_obs_height_measurements")
 
     # 奖励配置
 
@@ -376,11 +459,39 @@ class GO2WRoughCfg( BaseConfig ):
 class GO2WRoughCfgPPO( BaseConfig ):
     seed = 5
 
-    class policy:
-        init_noise_std = 1.0
-        activation = 'elu'
+    actor = {
+        "class_name": "ActorModel",
+        "backbone": {
+            "class_name": "rsl_rl.models:DreamWaQActorBackbone",
+            "actor_hidden_dims": [512, 256, 128],
+            "encoder_hidden_dims": [128, 64],
+            "decoder_hidden_dims": [64, 128],
+            "latent_dim": 19,
+            "velocity_dim": 3,
+            "velocity_target_group": "prev_critic_base_lin_vel",
+            "decoder_output_group": "actor",
+            "activation": "elu",
+            "autoencoder_loss_coef": 0.25,
+            "velocity_loss_coef": 1.0,
+            "reconstruction_loss_coef": 1.0,
+            "kl_loss_coef": 1.0,
+        },
+        "distribution_cfg": {
+            "class_name": "GaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    }
+
+    critic = {
+        "class_name": "MLPModel",
+        "hidden_dims": [512, 256, 128],
+        "activation": "elu",
+        "obs_normalization": False,
+    }
 
     class algorithm:
+        class_name = "PPO"
         # training params
         value_loss_coef = 1.0
         use_clipped_value_loss = True
@@ -395,29 +506,34 @@ class GO2WRoughCfgPPO( BaseConfig ):
         max_grad_norm = 1.
         entropy_coef = 0.003
 
-        sym_loss = True
         # obs = [imu(6), cmd(3), motor(q,dq,32), dof_pos(16), action(16)] -> 73
-        obs_permutation = [
-            -0.0001, -1, 2, -3, 4, -5, 6, -7, -8,
-            -13, 14, 15, 16, -9.0001, 10, 11, 12, -21, 22, 23, 24, -17, 18, 19, 20,
-            -29, 30, 31, 32, -25.0001, 26, 27, 28, -37, 38, 39, 40, -33, 34, 35, 36,
-            -45, 46, 47, 48, -41.0001, 42, 43, 44, -53, 54, 55, 56, -49, 50, 51, 52,
-            -61, 62, 63, 64, -57.0001, 58, 59, 60, -69, 70, 71, 72, -65, 66, 67, 68,
+        plugins = [
+            {
+                "class_name": "rsl_rl.algorithms.plugins:SymmetryLossPlugin",
+                "obs_permutation": [
+                    -0.0001, -1, 2, -3, 4, -5, 6, -7, -8,
+                    -13, 14, 15, 16, -9.0001, 10, 11, 12, -21, 22, 23, 24, -17, 18, 19, 20,
+                    -29, 30, 31, 32, -25.0001, 26, 27, 28, -37, 38, 39, 40, -33, 34, 35, 36,
+                    -45, 46, 47, 48, -41.0001, 42, 43, 44, -53, 54, 55, 56, -49, 50, 51, 52,
+                    -61, 62, 63, 64, -57.0001, 58, 59, 60, -69, 70, 71, 72, -65, 66, 67, 68,
+                ],
+                "act_permutation": [-4, 5, 6, 7, -0.0001, 1, 2, 3, -12, 13, 14, 15, -8, 9, 10, 11],
+                "frame_stack": 5,
+                "sym_coef": 1.0,
+            }
         ]
-        act_permutation = [-4, 5, 6, 7, -0.0001, 1, 2, 3, -12, 13, 14, 15, -8, 9, 10, 11]
-        frame_stack = 5
-        sym_coef = 1.0
         
     class runner:
-        runner_class_name = 'OnPolicyRunner'
-        policy_class_name = 'ActorCritic_DWAQ'
-        algorithm_class_name = 'PPO'
+        runner_class_name = "rsl_rl.runners:OnPolicyRunner"
+        logger = "wandb"
+        wandb_project = "rough_go2w"
+        wandb_mode = "online"
         save_interval = 500 # check for potential saves every this many iterations
         run_name = 'blind_50_1_40_0.5_trmeish'
         experiment_name = 'rough_go2w'
         num_steps_per_env = 24 # per iteration
         max_iterations = 10000
-        load_run = "/home/hu/csq/DreamWaQ/legged_gym/logs/rough_go2w/May20_22-55-02_blind_50_1_40_0.5_trmeish"
+        load_run = -1
         checkpoint = -1
         resume = False
         resume_path = None

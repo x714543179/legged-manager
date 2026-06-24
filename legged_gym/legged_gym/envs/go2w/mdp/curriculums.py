@@ -14,6 +14,9 @@ def terrain_levels(env, env_ids):
     move_down = (
         distance < torch.norm(env.commands[env_ids, :2], dim=1) * env.max_episode_length_s * 0.5
     ) * ~move_up
+    if hasattr(env, "terrain_importer"):
+        env.terrain_importer.update_env_origins(env, env_ids, move_up, move_down)
+        return
     env.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
     env.terrain_levels[env_ids] = torch.where(
         env.terrain_levels[env_ids] >= env.max_terrain_level,
