@@ -3,11 +3,11 @@
 
 
 
-\
+
 
 **Legged Manager** is an Isaac Gym based reinforcement learning framework for legged and wheel-legged robot locomotion.
 
-This repository extends the classic `legged_gym + rsl_rl` training stack with an **IsaacLab-style manager architecture**, making robot tasks easier to organize, customize, debug, and reuse.
+This repository extends the classic `**legged_gym + rsl_rl**` training stack with an **IsaacLab-style manager architecture**, making robot tasks easier to organize, customize, debug, and reuse.
 
 The current release focuses on a **Go2W robot locomotion task** with modular managers for actions, commands, observations, rewards, terminations, events, terrain generation, domain randomization, latency simulation, and DreamWaQ policy training.
 
@@ -31,7 +31,7 @@ The current release focuses on a **Go2W robot locomotion task** with modular man
 
 | Task   | Robot | Terrain                  | Policy                     | Status |
 | ------ | ----- | ------------------------ | -------------------------- | ------ |
-| `go2w` | Go2W  | rough terrain and stairs | PPO + DreamWaQ-style actor | active |
+| `go2w` | Go2W  | rough terrain and stairs | DreamWaQ | active |
 
 ---
 
