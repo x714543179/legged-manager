@@ -129,7 +129,8 @@ class BaseTask():
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_L, "vy_minus")
             
-        self.free_cam = False  # 是否启用自由相机（默认关闭）
+        viewer_cfg = getattr(cfg, "viewer", None)
+        self.free_cam = not getattr(viewer_cfg, "follow_robot", True)  # 是否启用自由相机
         self.lookat_id = 0  # 当前 viewer 关注的 agent ID
 
         # 相机观察向量（例如偏前上方），会用于 set_camera_lookat 函数定位视角

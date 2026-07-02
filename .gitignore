@@ -3,13 +3,8 @@
 # Learn more about .gitignore:
 #     https://www.atlassian.com/git/tutorials/saving-changes/gitignore
 
-# 不想上传的自定义文件夹
-/legged_gym/legged_gym/envs/nezha/
-
-
-
+# 
 /legged_gym/docs/
-
 
 
 # Node artifact files
@@ -69,3 +64,8 @@ __pycache__
 .codex
 env_cfg.pkl
 train_cfg.pkl
+
+/legged_gym/legged_gym/envs/nezha/
+/legged_gym/resources/robots/nezha/
+/legged_gym/legged_gym/envs/sy2601/
+/legged_gym/resources/robots/t1/

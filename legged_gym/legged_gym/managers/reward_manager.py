@@ -32,6 +32,7 @@ class RewardManager(ManagerBase):
             if name == "termination":
                 continue
             rew = self._call_term(term) * self._term_scale(term)
+            rew = self._clip_scaled_reward(rew, term)
             env.rew_buf += rew
             self.episode_sums[name] += rew
             step_metrics[f"rew_{name}"] = rew
@@ -41,6 +42,7 @@ class RewardManager(ManagerBase):
             index = self._term_names.index("termination")
             term = self._terms[index]
             rew = self._call_term(term) * self._term_scale(term)
+            rew = self._clip_scaled_reward(rew, term)
             env.rew_buf += rew
             self.episode_sums["termination"] += rew
             step_metrics["rew_termination"] = rew
@@ -72,3 +74,11 @@ class RewardManager(ManagerBase):
         if term.use_dt:
             scale *= self.env.dt
         return scale
+
+    def _clip_scaled_reward(self, rew, term: ManagerTermCfg):
+        clip_range = term.clip
+        if clip_range is None:
+            clip_range = getattr(self.env.cfg.rewards, "clip_scaled_rewards", None)
+        if clip_range is None:
+            return rew
+        return torch.clip(rew, min=clip_range[0], max=clip_range[1])

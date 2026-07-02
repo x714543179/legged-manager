@@ -1,5 +1,6 @@
 from legged_gym.envs.base.base_config import BaseConfig
 from legged_gym.managers import ManagerTermCfg, ObsGroup
+from legged_gym.plotting import PlotTermCfg
 from legged_gym.envs.go2w import mdp
 
 class GO2WRoughCfg( BaseConfig ):
@@ -436,6 +437,35 @@ class GO2WRoughCfg( BaseConfig ):
     class viewer:
         pos = [10, 0, 6]
         lookat = [11., 5, 3.]
+
+    class plots:
+        enabled = False
+        backend = "matplotlib"
+        interval = 1
+        max_steps = 1000
+        show = True
+        terms = {
+            "joint_state": PlotTermCfg(
+                func="legged_gym.plotting.terms:joint_state",
+                params={
+                    "env_index": 0,
+                    "joint_index": 2,
+                    "key_prefix": "joint",
+                },
+            ),
+        }
+        figures = [
+            {
+                "name": "joint_state",
+                "title": "Joint State",
+                "layout": [3, 1],
+                "plots": [
+                    {"title": "position", "series": ["joint_pos"], "ylabel": "rad"},
+                    {"title": "velocity", "series": ["joint_vel"], "ylabel": "rad/s"},
+                    {"title": "torque", "series": ["joint_torque"], "ylabel": "Nm"},
+                ],
+            }
+        ]
 
     class sim:
         dt = 0.005

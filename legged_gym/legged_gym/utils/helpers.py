@@ -218,6 +218,14 @@ def get_args():
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
         {"name": "--group_name", "type": str, "default": "main", "help": "Experiment group name"},
+        {"name": "--viewer", "type": str, "default": "native", "choices": ["native", "viser"], "help": "Viewer backend used by play.py"},
+        {"name": "--viser_port", "type": int, "default": 8080, "help": "Port for the optional Viser web viewer"},
+        {"name": "--plot", "action": "store_true", "default": False, "help": "Enable optional play-time plotting"},
+        {"name": "--plot_backend", "type": str, "default": None, "help": "Plotting backend name or import path"},
+        {"name": "--plot_steps", "type": int, "default": None, "help": "Maximum number of play steps to record for plotting"},
+        {"name": "--plot_interval", "type": int, "default": None, "help": "Record one plotting sample every N play steps"},
+        {"name": "--plot_output_dir", "type": str, "default": None, "help": "Directory for saved plot images"},
+        {"name": "--plot_no_show", "action": "store_true", "default": False, "help": "Save plots without opening a matplotlib window"},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

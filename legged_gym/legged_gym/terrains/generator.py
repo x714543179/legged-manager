@@ -35,12 +35,16 @@ class TerrainGenerator:
         self.border_size = getattr(cfg, "border_size", 0.0)
         self.curriculum = getattr(cfg, "curriculum", False)
         self.flat_ratio = getattr(cfg, "flat_ratio", 0.0)
+        self.tile_spacing = getattr(cfg, "terrain_spacing", 0.0)
 
         self.width_per_env_pixels = int(self.env_width / self.horizontal_scale)
         self.length_per_env_pixels = int(self.env_length / self.horizontal_scale)
+        self.tile_spacing_pixels = int(self.tile_spacing / self.horizontal_scale)
+        self.tile_width_stride = self.width_per_env_pixels + self.tile_spacing_pixels
+        self.tile_length_stride = self.length_per_env_pixels + self.tile_spacing_pixels
         self.border = int(self.border_size / self.horizontal_scale)
-        self.tot_cols = int(self.num_cols * self.width_per_env_pixels) + 2 * self.border
-        self.tot_rows = int(self.num_rows * self.length_per_env_pixels) + 2 * self.border
+        self.tot_cols = int(self.num_cols * self.width_per_env_pixels + max(0, self.num_cols - 1) * self.tile_spacing_pixels) + 2 * self.border
+        self.tot_rows = int(self.num_rows * self.length_per_env_pixels + max(0, self.num_rows - 1) * self.tile_spacing_pixels) + 2 * self.border
 
         self.height_field_raw = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
         self.env_origins = np.zeros((self.num_rows, self.num_cols, 3), dtype=np.float32)
@@ -127,7 +131,7 @@ class TerrainGenerator:
     def _difficulty(self, row: int) -> float:
         lo, hi = self.difficulty_range
         if self.curriculum:
-            alpha = row / max(1, self.num_rows)
+            alpha = row / max(1, self.num_rows - 1)
         else:
             alpha = self.rng.choice([0.5, 0.75, 0.9])
         return float(lo + (hi - lo) * alpha)
@@ -146,14 +150,14 @@ class TerrainGenerator:
 
     def _add_terrain_to_map(self, result: SubTerrainResult, row: int, col: int) -> None:
         terrain = result.terrain
-        start_x = self.border + row * self.length_per_env_pixels
-        end_x = self.border + (row + 1) * self.length_per_env_pixels
-        start_y = self.border + col * self.width_per_env_pixels
-        end_y = self.border + (col + 1) * self.width_per_env_pixels
+        start_x = self.border + row * self.tile_length_stride
+        end_x = start_x + self.length_per_env_pixels
+        start_y = self.border + col * self.tile_width_stride
+        end_y = start_y + self.width_per_env_pixels
         self.height_field_raw[start_x:end_x, start_y:end_y] = terrain.height_field_raw
 
-        env_origin_x = (row + 0.5) * self.env_length
-        env_origin_y = (col + 0.5) * self.env_width
+        env_origin_x = row * (self.env_length + self.tile_spacing) + 0.5 * self.env_length
+        env_origin_y = col * (self.env_width + self.tile_spacing) + 0.5 * self.env_width
         x1 = int((self.env_length / 2.0 - 1.0) / terrain.horizontal_scale)
         x2 = int((self.env_length / 2.0 + 1.0) / terrain.horizontal_scale)
         y1 = int((self.env_width / 2.0 - 1.0) / terrain.horizontal_scale)
@@ -171,8 +175,8 @@ class TerrainGenerator:
             value_array = np.asarray(value, dtype=np.float32)
         if value_array.ndim == 1 and value_array.shape[0] >= 2:
             value_array = value_array.copy()
-            value_array[0] += row * self.env_length
-            value_array[1] += col * self.env_width
+            value_array[0] += row * (self.env_length + self.tile_spacing)
+            value_array[1] += col * (self.env_width + self.tile_spacing)
 
         if key not in self.extras:
             self._extra_shapes[key] = value_array.shape

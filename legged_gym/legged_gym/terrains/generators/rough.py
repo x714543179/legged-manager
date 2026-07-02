@@ -24,6 +24,7 @@ class RoughTerrainGenerator(TerrainGenerator):
             ("stairs_down", {"class_name": "legged_gym.terrains.generators.rough:PyramidStairsTerrain", "inverted": True}, 1.0),
             ("stairs_up", {"class_name": "legged_gym.terrains.generators.rough:PyramidStairsTerrain", "inverted": False}, 1.0),
             ("discrete", {"class_name": "legged_gym.terrains.generators.rough:DiscreteObstaclesTerrain"}, 1.0),
+            ("highplatform", {"class_name": "legged_gym.terrains.generators.rough:HighPlatformTerrain"}, 1.0),
             ("stepping_stones", {"class_name": "legged_gym.terrains.generators.rough:SteppingStonesTerrain"}, 1.0),
             ("gap", {"class_name": "legged_gym.terrains.generators.rough:GapTerrain"}, 1.0),
             ("pit", {"class_name": "legged_gym.terrains.generators.rough:PitTerrain"}, 1.0),
@@ -119,6 +120,24 @@ class DiscreteObstaclesTerrain:
 
 
 @dataclass
+class HighPlatformTerrain:
+    step_width: float = 1.0
+    step_height_range: tuple[float, float] = (0.20, 1.00)
+    platform_size: float = 3.0
+    terrain_type: int = 5
+
+    def generate(self, terrain, difficulty: float, row: int, col: int, rng) -> SubTerrainResult:
+        step_height = self.step_height_range[0] + (self.step_height_range[1] - self.step_height_range[0]) * difficulty
+        terrain_utils.pyramid_stairs_terrain(
+            terrain,
+            step_width=self.step_width,
+            step_height=-step_height,
+            platform_size=self.platform_size,
+        )
+        return SubTerrainResult(terrain, self.terrain_type)
+
+
+@dataclass
 class SteppingStonesTerrain:
     stone_size_range: tuple[float, float] = (1.5, 0.075)
     stone_distance: float = 0.1
@@ -185,4 +204,3 @@ def _pit_terrain(terrain, depth, platform_size=1.0):
     y1 = terrain.width // 2 - platform_size
     y2 = terrain.width // 2 + platform_size
     terrain.height_field_raw[x1:x2, y1:y2] = -depth
-

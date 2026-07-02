@@ -37,5 +37,4 @@ from legged_gym.utils.task_registry import task_registry
 
 
 task_registry.register( "go2w", Go2w, GO2WRoughCfg(), GO2WRoughCfgPPO())
-# task_registry.register("nezha", NEZHA, NEZHARoughCfg(), NEZHARoughCfgPPO() )
 
