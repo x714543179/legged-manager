@@ -16,7 +16,8 @@ The current release focuses on a **Go2W robot locomotion task** with modular man
 ## Highlights
 
 **Manager-based task architecture**
-  Task logic is split into reusable managers:
+
+Task logic is split into reusable managers:
 
   * `ActionManager`
   * `CommandManager`
