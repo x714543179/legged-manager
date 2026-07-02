@@ -7,7 +7,7 @@
 
 **Legged Manager** is an Isaac Gym based reinforcement learning framework for legged and wheel-legged robot locomotion.
 
-This repository extends the classic `**legged_gym + rsl_rl**` training stack with an **IsaacLab-style manager architecture**, making robot tasks easier to organize, customize, debug, and reuse.
+This repository extends the classic `legged_gym + rsl_rl` training stack with an **IsaacLab-style manager architecture**, making robot tasks easier to organize, customize, debug, and reuse.
 
 The current release focuses on a **Go2W robot locomotion task** with modular managers for actions, commands, observations, rewards, terminations, events, terrain generation, domain randomization, latency simulation, and DreamWaQ policy training.
 
@@ -45,8 +45,9 @@ conda activate legged-manager
 ```
 
 ### 2. Install Isaac Gym
-Firstly, install the PyTorch and CUDA versions required by Isaac Gym environment requirements.
-Then, download Isaac Gym from NVIDIA, then install the Python package:
+Firstly, **install the PyTorch and CUDA versions required by Isaac Gym environment requirements**.
+
+Then, **download Isaac Gym from NVIDIA, then install the Python package**:
 
 ```bash
 cd isaacgym/python
