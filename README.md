@@ -9,8 +9,6 @@
 
 This repository extends the classic `legged_gym + rsl_rl` training stack with an **IsaacLab-style manager architecture**, making robot tasks easier to organize, customize, debug, and reuse.
 
-The current release focuses on a **Go2W robot locomotion task** with modular managers for actions, commands, observations, rewards, terminations, events, terrain generation, domain randomization, latency simulation, and DreamWaQ policy training.
-
 ---
 
 ## Highlights
