@@ -122,12 +122,14 @@ legged_gym/logs/<experiment_name>/<run_name>/
 ---
 
 ## Manager architecture
-The core design of this repository is a manager-based Isaac Gym environment architecture.
 
-Classic legged_gym is fast and widely used, but when a task becomes complex, environment logic can easily become tightly coupled. Reward functions, observation construction, randomization, command sampling, reset conditions, and action processing may be mixed inside large environment files, making new tasks harder to modify, debug, and compare.
+The core design of this repository is a **manager-based Isaac Gym environment architecture**.
 
-Legged Manager reorganizes the Isaac Gym training pipeline around configurable manager terms. Each part of the environment is handled by an independent manager, and each manager dispatches a group of registered terms defined in the task configuration.
+Classic `legged_gym` is fast and widely used, but when a task becomes complex, environment logic can easily become tightly coupled. Reward functions, observation construction, randomization, command sampling, reset conditions, and action processing may be mixed inside large environment files, making new tasks harder to modify, debug, and compare.
 
+Legged Manager reorganizes the Isaac Gym training pipeline around **configurable manager terms**. Each part of the environment is handled by an independent manager, and each manager dispatches a group of registered terms defined in the task configuration.
+
+```text
 ManagerBasedTask
 ├── ActionManager
 ├── CommandManager
@@ -135,20 +137,22 @@ ManagerBasedTask
 ├── RewardManager
 ├── TerminationManager
 └── EventManager
+```
 
 The manager-based design makes the environment easier to extend in several ways:
 
-new observation terms can be added without rewriting the whole environment;
-reward terms can be enabled, disabled, replaced, or reweighted from configuration;
-termination conditions can be organized as independent safety and reset checks;
-domain randomization can be written as event terms;
-command generators can be replaced for different locomotion tasks;
-different robot tasks can share the same manager infrastructure;
-ablation studies become cleaner because each term has an explicit configuration entry;
-IsaacLab-style modular environment design can be used inside an Isaac Gym training pipeline.
+* new observation terms can be added without rewriting the whole environment;
+* reward terms can be enabled, disabled, replaced, or reweighted from configuration;
+* termination conditions can be organized as independent safety and reset checks;
+* domain randomization can be written as event terms;
+* command generators can be replaced for different locomotion tasks;
+* different robot tasks can share the same manager infrastructure;
+* ablation studies become cleaner because each term has an explicit configuration entry;
+* IsaacLab-style modular environment design can be used inside an Isaac Gym training pipeline.
 
 For example, reward terms can be defined as structured configuration items:
 
+```python
 class rewards_manager:
     tracking_lin_vel = ManagerTermCfg(
         func=mdp.tracking_lin_vel,
@@ -167,9 +171,11 @@ class rewards_manager:
         scale=-2.0,
         env_arg=True,
     )
+```
 
 Event terms such as friction randomization can also be configured independently:
 
+```python
 class events:
     friction = ManagerTermCfg(
         func=mdp.randomize_friction,
@@ -180,9 +186,11 @@ class events:
             "friction_range": [0.2, 1.25],
         },
     )
+```
 
 Observation groups can be organized through the observation manager:
 
+```python
 class observations:
     class actor(ObsGroup):
         imu = ManagerTermCfg(func=mdp.imu, env_arg=True)
@@ -190,6 +198,7 @@ class observations:
         motor = ManagerTermCfg(func=mdp.motor, env_arg=True)
         dof_pos = ManagerTermCfg(func=mdp.dof_pos, env_arg=True)
         action = ManagerTermCfg(func="_obs_actions")
+```
 
 This design is especially useful for legged robot reinforcement learning, where training performance depends on many coupled components such as commands, rewards, observations, reset rules, terrain curriculum, and randomization. By turning these components into manager terms, the codebase becomes easier to maintain and more suitable for rapid research iteration.
 
